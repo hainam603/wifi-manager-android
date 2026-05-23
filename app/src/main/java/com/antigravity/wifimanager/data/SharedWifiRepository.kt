@@ -5,9 +5,11 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import com.antigravity.wifimanager.util.LocationHelper
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlin.math.cos
 import java.util.concurrent.TimeUnit
 
@@ -23,6 +25,7 @@ class SharedWifiRepository(private val context: Context) {
     private var cacheLng: Double? = null
     private var cacheAtMs: Long = 0L
     private val credentialByKey = mutableMapOf<String, SharedWifiCredential>()
+    private val credentialLock = Any()
 
     companion object {
         private const val KEY_SHARED_WIFI_ENABLED = "shared_wifi_enabled"
@@ -133,11 +136,17 @@ class SharedWifiRepository(private val context: Context) {
     }
 
     fun clearMemoryCache() {
-        cachedCredentials = emptyList()
-        credentialByKey.clear()
+        synchronized(credentialLock) {
+            cachedCredentials = emptyList()
+            credentialByKey.clear()
+        }
         cacheAtMs = 0L
         cacheLat = null
         cacheLng = null
+    }
+
+    private fun isCredentialCacheEmpty(): Boolean = synchronized(credentialLock) {
+        credentialByKey.isEmpty()
     }
 
     fun getSharedPassword(ssid: String, bssid: String? = null): String? =
@@ -147,7 +156,7 @@ class SharedWifiRepository(private val context: Context) {
         findCredentialInCache(ssid, bssid)?.providerName
 
     private fun findCredentialInCache(ssid: String, bssid: String?): SharedWifiCredential? {
-        if (credentialByKey.isEmpty()) return null
+        if (isCredentialCacheEmpty()) return null
         val ap = WifiApInfo(
             ssid = ssid,
             bssid = bssid ?: "02:00:00:00:00:00",
@@ -160,7 +169,7 @@ class SharedWifiRepository(private val context: Context) {
 
     /** Tra mật khẩu cộng đồng — khớp SSID/BSSID tương tự như lúc quét. */
     fun resolvePassword(ssid: String, bssid: String?, wifiRepository: WifiRepository): String? {
-        if (credentialByKey.isEmpty() && isOfflineCacheEnabled()) {
+        if (isCredentialCacheEmpty() && isOfflineCacheEnabled()) {
             val location = LocationHelper.getLastKnownLocation(context)
             if (location != null) {
                 val offline = offlineStore.queryNearby(
@@ -169,7 +178,9 @@ class SharedWifiRepository(private val context: Context) {
                     offlineLookupRadiusMeters()
                 )
                 if (offline.isNotEmpty()) {
-                    cachedCredentials = offline
+                    synchronized(credentialLock) {
+                        cachedCredentials = offline
+                    }
                     rebuildPasswordIndex()
                 }
             }
@@ -217,12 +228,14 @@ class SharedWifiRepository(private val context: Context) {
         )
         findMatch(ap, wifiRepository)?.password?.let { if (it == password) return true }
         resolvePassword(ssid, bssid, wifiRepository)?.let { if (it == password) return true }
-        return credentialByKey.values.any { cred ->
-            cred.password == password && (
-                cred.ssid.equals(ssid, ignoreCase = true) ||
-                    wifiRepository.ssidsMatch(cred.ssid, ssid) ||
-                    wifiRepository.areRelatedSsids(cred.ssid, ssid)
-                )
+        return synchronized(credentialLock) {
+            credentialByKey.values.any { cred ->
+                cred.password == password && (
+                    cred.ssid.equals(ssid, ignoreCase = true) ||
+                        wifiRepository.ssidsMatch(cred.ssid, ssid) ||
+                        wifiRepository.areRelatedSsids(cred.ssid, ssid)
+                    )
+            }
         }
     }
 
@@ -312,7 +325,7 @@ class SharedWifiRepository(private val context: Context) {
 
         if (isNetworkAvailable() && (isWifiMasterEnabled() || apiUrl.isNotBlank())) {
             refresh(force = true)
-        } else if (credentialByKey.isEmpty() && isOfflineCacheEnabled()) {
+        } else if (isCredentialCacheEmpty() && isOfflineCacheEnabled()) {
             val location = LocationHelper.getLastKnownLocation(context)
             if (location != null) {
                 val offline = offlineStore.queryNearby(
@@ -321,7 +334,9 @@ class SharedWifiRepository(private val context: Context) {
                     offlineLookupRadiusMeters()
                 )
                 if (offline.isNotEmpty()) {
-                    cachedCredentials = offline
+                    synchronized(credentialLock) {
+                        cachedCredentials = offline
+                    }
                     rebuildPasswordIndex()
                 }
             }
@@ -340,7 +355,9 @@ class SharedWifiRepository(private val context: Context) {
                 WifiCredentialKeys.normalizeBssid(cred.bssid) == normalizedBssid
             }
             if (match != null) {
-                cachedCredentials = mergeCredentials(listOf(match), cachedCredentials)
+                synchronized(credentialLock) {
+                    cachedCredentials = mergeCredentials(listOf(match), cachedCredentials)
+                }
                 rebuildPasswordIndex()
             }
         }
@@ -369,7 +386,9 @@ class SharedWifiRepository(private val context: Context) {
         }
 
         rejectedStore.clearIfPasswordUpdated(listOf(withBssid))
-        cachedCredentials = mergeCredentials(listOf(withBssid), cachedCredentials)
+        synchronized(credentialLock) {
+            cachedCredentials = mergeCredentials(listOf(withBssid), cachedCredentials)
+        }
         rebuildPasswordIndex()
         cacheAtMs = System.currentTimeMillis()
 
@@ -432,7 +451,9 @@ class SharedWifiRepository(private val context: Context) {
             )
 
         rejectedStore.clearIfPasswordUpdated(listOf(cred))
-        cachedCredentials = mergeCredentials(listOf(cred), cachedCredentials)
+        synchronized(credentialLock) {
+            cachedCredentials = mergeCredentials(listOf(cred), cachedCredentials)
+        }
         rebuildPasswordIndex()
         cacheAtMs = System.currentTimeMillis()
 
@@ -553,7 +574,27 @@ class SharedWifiRepository(private val context: Context) {
         }.take(MAX_PREFETCH_POINTS)
     }
 
-    fun refresh(force: Boolean = false): SharedWifiFetchResult {
+    /** Gọi từ luồng quét WiFi — có timeout, ưu tiên cache để không treo tab Quét. */
+    fun refreshForScan(forceRefresh: Boolean = false) {
+        if (!isEnabled()) return
+        try {
+            runBlocking {
+                withTimeout(12_000L) {
+                    refreshAsync(force = forceRefresh)
+                }
+            }
+        } catch (_: TimeoutCancellationException) {
+            // Tiếp tục với offline/cache đã có
+        } catch (_: Exception) {
+            // Bỏ qua — vẫn enrich từ cache offline
+        }
+    }
+
+    fun refresh(force: Boolean = false): SharedWifiFetchResult = runBlocking {
+        refreshAsync(force)
+    }
+
+    suspend fun refreshAsync(force: Boolean = false): SharedWifiFetchResult {
         if (!isEnabled()) {
             return SharedWifiFetchResult(skipped = true, reason = "Đã tắt API chia sẻ")
         }
@@ -581,7 +622,7 @@ class SharedWifiRepository(private val context: Context) {
 
         val hasNetwork = isNetworkAvailable()
         val onlineFetched = if (hasNetwork && (isWifiMasterEnabled() || getApiUrl().isNotBlank())) {
-            runBlocking(Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 fetchAllSources(location.latitude, location.longitude)
             }
         } else {
@@ -607,7 +648,9 @@ class SharedWifiRepository(private val context: Context) {
             return SharedWifiFetchResult(skipped = true, reason = reason)
         }
 
-        cachedCredentials = merged
+        synchronized(credentialLock) {
+            cachedCredentials = merged
+        }
         cacheLat = location.latitude
         cacheLng = location.longitude
         cacheAtMs = now
@@ -676,7 +719,7 @@ class SharedWifiRepository(private val context: Context) {
             return aps.map { it.copy(isReadyToConnect = it.hasStoredPassword) }
         }
 
-        if (credentialByKey.isEmpty() && isOfflineCacheEnabled()) {
+        if (isCredentialCacheEmpty() && isOfflineCacheEnabled()) {
             val location = LocationHelper.getLastKnownLocation(context)
             if (location != null) {
                 val offline = offlineStore.queryNearby(
@@ -685,13 +728,15 @@ class SharedWifiRepository(private val context: Context) {
                     offlineLookupRadiusMeters()
                 )
                 if (offline.isNotEmpty()) {
-                    cachedCredentials = offline
+                    synchronized(credentialLock) {
+                        cachedCredentials = offline
+                    }
                     rebuildPasswordIndex()
                 }
             }
         }
 
-        if (credentialByKey.isEmpty()) {
+        if (isCredentialCacheEmpty()) {
             return aps.map { enrichWithSharedMatch(it, null, wifiRepository) }
         }
 
@@ -701,45 +746,49 @@ class SharedWifiRepository(private val context: Context) {
     }
 
     private fun findMatch(ap: WifiApInfo, wifiRepository: WifiRepository): SharedWifiCredential? {
-        val apBssid = WifiCredentialKeys.normalizeBssid(ap.bssid)
+        synchronized(credentialLock) {
+            val apBssid = WifiCredentialKeys.normalizeBssid(ap.bssid)
 
-        if (apBssid.isNotEmpty()) {
-            credentialByKey[WifiCredentialKeys.credentialKey(ap.ssid, apBssid)]?.let { return it }
-            credentialByKey.values.firstOrNull { cred ->
-                WifiCredentialKeys.normalizeBssid(cred.bssid) == apBssid
-            }?.let { return it }
-        }
-
-        credentialByKey[WifiCredentialKeys.credentialKey(ap.ssid, null)]?.let { return it }
-
-        if (apBssid.isNotEmpty()) {
-            credentialByKey.values.firstOrNull { cred ->
-                cred.ssid.equals(ap.ssid, ignoreCase = true) &&
-                    WifiCredentialKeys.normalizeBssid(cred.bssid).isEmpty()
-            }?.let { return it }
-        }
-
-        for (cred in credentialByKey.values) {
-            if (!wifiRepository.areRelatedSsids(cred.ssid, ap.ssid)) continue
-            if (apBssid.isNotEmpty() && WifiCredentialKeys.isValidBssid(cred.bssid)) {
-                if (WifiCredentialKeys.normalizeBssid(cred.bssid) == apBssid) return cred
-            } else if (WifiCredentialKeys.normalizeBssid(cred.bssid).isEmpty()) {
-                return cred
+            if (apBssid.isNotEmpty()) {
+                credentialByKey[WifiCredentialKeys.credentialKey(ap.ssid, apBssid)]?.let { return it }
+                credentialByKey.values.firstOrNull { cred ->
+                    WifiCredentialKeys.normalizeBssid(cred.bssid) == apBssid
+                }?.let { return it }
             }
-        }
 
-        return null
+            credentialByKey[WifiCredentialKeys.credentialKey(ap.ssid, null)]?.let { return it }
+
+            if (apBssid.isNotEmpty()) {
+                credentialByKey.values.firstOrNull { cred ->
+                    cred.ssid.equals(ap.ssid, ignoreCase = true) &&
+                        WifiCredentialKeys.normalizeBssid(cred.bssid).isEmpty()
+                }?.let { return it }
+            }
+
+            for (cred in credentialByKey.values) {
+                if (!wifiRepository.areRelatedSsids(cred.ssid, ap.ssid)) continue
+                if (apBssid.isNotEmpty() && WifiCredentialKeys.isValidBssid(cred.bssid)) {
+                    if (WifiCredentialKeys.normalizeBssid(cred.bssid) == apBssid) return cred
+                } else if (WifiCredentialKeys.normalizeBssid(cred.bssid).isEmpty()) {
+                    return cred
+                }
+            }
+
+            return null
+        }
     }
 
     private fun rebuildPasswordIndex() {
-        credentialByKey.clear()
-        cachedCredentials.forEach { cred ->
-            val key = if (WifiCredentialKeys.isValidBssid(cred.bssid)) {
-                WifiCredentialKeys.credentialKey(cred.ssid, cred.bssid)
-            } else {
-                WifiCredentialKeys.credentialKey(cred.ssid, null)
+        synchronized(credentialLock) {
+            credentialByKey.clear()
+            cachedCredentials.forEach { cred ->
+                val key = if (WifiCredentialKeys.isValidBssid(cred.bssid)) {
+                    WifiCredentialKeys.credentialKey(cred.ssid, cred.bssid)
+                } else {
+                    WifiCredentialKeys.credentialKey(cred.ssid, null)
+                }
+                credentialByKey[key] = cred
             }
-            credentialByKey[key] = cred
         }
     }
 

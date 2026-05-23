@@ -29,9 +29,21 @@ data class ScannerDisplayState(
     companion object {
         val Empty = ScannerDisplayState(null, emptyList(), emptyList())
     }
+
+    fun hasRows(): Boolean =
+        connectedRow != null || savedRows.isNotEmpty() || nearbyRows.isNotEmpty()
+
+    fun totalRowCount(): Int =
+        (if (connectedRow != null) 1 else 0) + savedRows.size + nearbyRows.size
 }
 
 object ScannerUiMapper {
+
+    /** Hiển thị ngay trên UI thread — không resolve mật khẩu (tránh màn hình trống). */
+    fun buildQuick(
+        networks: List<WifiApInfo>,
+        connection: WifiConnectionState
+    ): ScannerDisplayState = build(networks, connection) { _, _ -> null }
 
     private val wifiApComparator = compareByDescending<WifiApInfo> { it.signalPercent }
         .thenByDescending { it.is5GHz }
@@ -52,18 +64,19 @@ object ScannerUiMapper {
                 ap.securityType.contains("SAE", ignoreCase = true) ||
                 ap.securityType.contains("PSK", ignoreCase = true)
             val hasSystemCredential = ap.hasStoredPassword || ap.isReadyToConnect
+            val resolvedPassword = resolvePassword(ap.ssid, ap.bssid)
             val passwordDisplay = buildPasswordDisplay(
                 ap = ap,
                 isNearbyGroup = isNearbyGroup,
                 hasSystemCredential = hasSystemCredential,
-                resolvedPassword = resolvePassword(ap.ssid, ap.bssid)
+                resolvedPassword = resolvedPassword
             )
             return ScannerApRowModel(
                 ap = ap,
                 passwordDisplay = passwordDisplay,
                 needsPassword = needsPassword,
                 hasSystemCredential = hasSystemCredential,
-                savedPassword = null,
+                savedPassword = resolvedPassword,
                 similarSsid = null,
                 similarPassword = null
             )

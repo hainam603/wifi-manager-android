@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
@@ -22,8 +23,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.antigravity.wifimanager.data.WifiApInfo
+import com.antigravity.wifimanager.data.WifiConnectionState
 import com.antigravity.wifimanager.data.WifiCredentialKeys
 import com.antigravity.wifimanager.data.WifiCredentialRefreshResult
+import com.antigravity.wifimanager.ui.scanner.ScannerUiMapper
 import com.antigravity.wifimanager.ui.components.GlassCard
 import com.antigravity.wifimanager.ui.components.WifiBandBadge
 import com.antigravity.wifimanager.ui.scanner.ScannerApRowModel
@@ -33,6 +36,8 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun ScannerScreen(
+    networks: List<WifiApInfo>,
+    connectionState: WifiConnectionState,
     displayState: ScannerDisplayState,
     networkCount: Int,
     scanStatusText: String,
@@ -58,12 +63,36 @@ fun ScannerScreen(
     var passwordDialogBssid by remember { mutableStateOf<String?>(null) }
     var passwordDialogSimilarSsid by remember { mutableStateOf<String?>(null) }
     var passwordInput by remember { mutableStateOf("") }
-    val connectedRow = displayState.connectedRow
-    val savedRows = displayState.savedRows
-    val nearbyRows = displayState.nearbyRows
-    val hasDisplayRows = connectedRow != null || savedRows.isNotEmpty() || nearbyRows.isNotEmpty()
+
+    val quickFallback = remember(
+        networks,
+        connectionState.ssid,
+        connectionState.bssid,
+        connectionState.isConnected,
+        connectionState.frequencyMhz,
+        connectionState.signalPercent
+    ) {
+        if (networks.isEmpty()) {
+            ScannerDisplayState.Empty
+        } else {
+            ScannerUiMapper.buildQuick(networks, connectionState)
+        }
+    }
+
+    val effectiveDisplayState = when {
+        displayState.hasRows() -> displayState
+        quickFallback.hasRows() -> quickFallback
+        else -> ScannerDisplayState.Empty
+    }
+
+    val connectedRow = effectiveDisplayState.connectedRow
+    val savedRows = effectiveDisplayState.savedRows
+    val nearbyRows = effectiveDisplayState.nearbyRows
+    val hasDisplayRows = effectiveDisplayState.hasRows()
+    val showScanningPlaceholder = isScanning && networkCount == 0
     val showEmptyPlaceholder = networkCount == 0 && !isScanning
-    val showList = networkCount > 0 && (hasDisplayRows || isScanning)
+    val showPreparingList = networkCount > 0 && !hasDisplayRows
+    val showList = networkCount > 0 && hasDisplayRows
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -129,7 +158,29 @@ fun ScannerScreen(
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
-            if (showEmptyPlaceholder) {
+            if (showScanningPlaceholder) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(36.dp),
+                            strokeWidth = 3.dp
+                        )
+                        Text(
+                            text = "Đang quét WiFi và tải dữ liệu cộng đồng...",
+                            color = TextSecondary,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            } else if (showEmptyPlaceholder) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -147,118 +198,61 @@ fun ScannerScreen(
                         )
                     }
                 }
-            } else if (showList) {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+            } else if (showPreparingList) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
                 ) {
-                    if (connectedRow != null) {
-                        item(key = "header_connected") {
-                            Text(
-                                text = "Đang kết nối",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(bottom = 6.dp, top = 4.dp)
-                            )
-                        }
-                        item(key = "connected_${connectedRow.stableKey}") {
-                            ScannerApListItem(
-                                row = connectedRow,
-                                signalPercentOverride = connectedSignalPercent,
-                                isConnectedState = true,
-                                connectingApKey = connectingApKey,
-                                connectFailedApKeys = connectFailedApKeys,
-                                refreshingPasswordApKey = refreshingPasswordApKey,
-                                rootConnectAvailable = rootConnectAvailable,
-                                onConnectNetwork = onConnectNetwork,
-                                onResolvePassword = onResolvePassword,
-                                onRefreshPasswordForBssid = onRefreshPasswordForBssid,
-                                coroutineScope = coroutineScope,
-                                snackbarHostState = snackbarHostState,
-                                onOpenPasswordDialog = { ssid, bssid, initial, similarSsid ->
-                                    passwordDialogSsid = ssid
-                                    passwordDialogBssid = bssid
-                                    passwordDialogSimilarSsid = similarSsid
-                                    passwordInput = initial
-                                }
-                            )
-                        }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(36.dp),
+                            strokeWidth = 3.dp
+                        )
+                        Text(
+                            text = "Đang chuẩn bị danh sách $networkCount mạng...",
+                            color = TextSecondary,
+                            fontSize = 14.sp
+                        )
                     }
-
-                    if (savedRows.isNotEmpty()) {
-                        item(key = "header_saved") {
-                            Text(
-                                text = "Mạng Wi-Fi đã lưu",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextSecondary,
-                                modifier = Modifier.padding(bottom = 6.dp, top = 12.dp)
-                            )
-                        }
-                        items(
-                            items = savedRows,
-                            key = { it.stableKey },
-                            contentType = { "saved" }
-                        ) { row ->
-                            ScannerApListItem(
-                                row = row,
-                                isConnectedState = false,
-                                connectingApKey = connectingApKey,
-                                connectFailedApKeys = connectFailedApKeys,
-                                refreshingPasswordApKey = refreshingPasswordApKey,
-                                rootConnectAvailable = rootConnectAvailable,
-                                onConnectNetwork = onConnectNetwork,
-                                onResolvePassword = onResolvePassword,
-                                onRefreshPasswordForBssid = onRefreshPasswordForBssid,
-                                coroutineScope = coroutineScope,
-                                snackbarHostState = snackbarHostState,
-                                onOpenPasswordDialog = { ssid, bssid, initial, similarSsid ->
-                                    passwordDialogSsid = ssid
-                                    passwordDialogBssid = bssid
-                                    passwordDialogSimilarSsid = similarSsid
-                                    passwordInput = initial
-                                }
-                            )
-                        }
+                }
+            } else if (showList) {
+                ScannerNetworkList(
+                    modifier = Modifier.weight(1f),
+                    displayState = effectiveDisplayState,
+                    connectedSignalPercent = connectedSignalPercent,
+                    connectingApKey = connectingApKey,
+                    connectFailedApKeys = connectFailedApKeys,
+                    refreshingPasswordApKey = refreshingPasswordApKey,
+                    rootConnectAvailable = rootConnectAvailable,
+                    onConnectNetwork = onConnectNetwork,
+                    onResolvePassword = onResolvePassword,
+                    onRefreshPasswordForBssid = onRefreshPasswordForBssid,
+                    coroutineScope = coroutineScope,
+                    snackbarHostState = snackbarHostState,
+                    onOpenPasswordDialog = { ssid, bssid, initial, similarSsid ->
+                        passwordDialogSsid = ssid
+                        passwordDialogBssid = bssid
+                        passwordDialogSimilarSsid = similarSsid
+                        passwordInput = initial
                     }
-
-                    if (nearbyRows.isNotEmpty()) {
-                        item(key = "header_nearby") {
-                            Text(
-                                text = "Chọn mạng Wi-Fi lân cận",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextSecondary,
-                                modifier = Modifier.padding(bottom = 6.dp, top = 12.dp)
-                            )
-                        }
-                        items(
-                            items = nearbyRows,
-                            key = { it.stableKey },
-                            contentType = { "nearby" }
-                        ) { row ->
-                            ScannerApListItem(
-                                row = row,
-                                isConnectedState = false,
-                                connectingApKey = connectingApKey,
-                                connectFailedApKeys = connectFailedApKeys,
-                                refreshingPasswordApKey = refreshingPasswordApKey,
-                                rootConnectAvailable = rootConnectAvailable,
-                                onConnectNetwork = onConnectNetwork,
-                                onResolvePassword = onResolvePassword,
-                                onRefreshPasswordForBssid = onRefreshPasswordForBssid,
-                                coroutineScope = coroutineScope,
-                                snackbarHostState = snackbarHostState,
-                                onOpenPasswordDialog = { ssid, bssid, initial, similarSsid ->
-                                    passwordDialogSsid = ssid
-                                    passwordDialogBssid = bssid
-                                    passwordDialogSimilarSsid = similarSsid
-                                    passwordInput = initial
-                                }
-                            )
-                        }
-                    }
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Đang tải giao diện...",
+                        color = TextSecondary,
+                        fontSize = 14.sp
+                    )
                 }
             }
         }
@@ -367,6 +361,127 @@ fun ScannerScreen(
 }
 
 @Composable
+private fun ScannerNetworkList(
+    modifier: Modifier = Modifier,
+    displayState: ScannerDisplayState,
+    connectedSignalPercent: Int,
+    connectingApKey: String?,
+    connectFailedApKeys: Set<String>,
+    refreshingPasswordApKey: String?,
+    rootConnectAvailable: Boolean,
+    onConnectNetwork: (String, String) -> Unit,
+    onResolvePassword: (String, String?) -> String?,
+    onRefreshPasswordForBssid: suspend (String, String) -> WifiCredentialRefreshResult,
+    coroutineScope: kotlinx.coroutines.CoroutineScope,
+    snackbarHostState: SnackbarHostState,
+    onOpenPasswordDialog: (ssid: String, bssid: String, initial: String, similarSsid: String?) -> Unit
+) {
+    val listState = rememberLazyListState()
+    val connectedRow = displayState.connectedRow
+    val savedRows = displayState.savedRows
+    val nearbyRows = displayState.nearbyRows
+
+    LazyColumn(
+        modifier = modifier,
+        state = listState,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        if (connectedRow != null) {
+            item(key = "header_connected", contentType = "header") {
+                Text(
+                    text = "Đang kết nối",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(bottom = 6.dp, top = 4.dp)
+                )
+            }
+            item(key = "connected_${connectedRow.stableKey}", contentType = "connected") {
+                ScannerApListItem(
+                    row = connectedRow,
+                    signalPercentOverride = connectedSignalPercent,
+                    isConnectedState = true,
+                    connectingApKey = connectingApKey,
+                    connectFailedApKeys = connectFailedApKeys,
+                    refreshingPasswordApKey = refreshingPasswordApKey,
+                    rootConnectAvailable = rootConnectAvailable,
+                    onConnectNetwork = onConnectNetwork,
+                    onResolvePassword = onResolvePassword,
+                    onRefreshPasswordForBssid = onRefreshPasswordForBssid,
+                    coroutineScope = coroutineScope,
+                    snackbarHostState = snackbarHostState,
+                    onOpenPasswordDialog = onOpenPasswordDialog
+                )
+            }
+        }
+
+        if (savedRows.isNotEmpty()) {
+            item(key = "header_saved", contentType = "header") {
+                Text(
+                    text = "Mạng Wi-Fi đã lưu",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextSecondary,
+                    modifier = Modifier.padding(bottom = 6.dp, top = 12.dp)
+                )
+            }
+            items(
+                items = savedRows,
+                key = { it.stableKey },
+                contentType = { "saved" }
+            ) { row ->
+                ScannerApListItem(
+                    row = row,
+                    isConnectedState = false,
+                    connectingApKey = connectingApKey,
+                    connectFailedApKeys = connectFailedApKeys,
+                    refreshingPasswordApKey = refreshingPasswordApKey,
+                    rootConnectAvailable = rootConnectAvailable,
+                    onConnectNetwork = onConnectNetwork,
+                    onResolvePassword = onResolvePassword,
+                    onRefreshPasswordForBssid = onRefreshPasswordForBssid,
+                    coroutineScope = coroutineScope,
+                    snackbarHostState = snackbarHostState,
+                    onOpenPasswordDialog = onOpenPasswordDialog
+                )
+            }
+        }
+
+        if (nearbyRows.isNotEmpty()) {
+            item(key = "header_nearby", contentType = "header") {
+                Text(
+                    text = "Chọn mạng Wi-Fi lân cận",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextSecondary,
+                    modifier = Modifier.padding(bottom = 6.dp, top = 12.dp)
+                )
+            }
+            items(
+                items = nearbyRows,
+                key = { it.stableKey },
+                contentType = { "nearby" }
+            ) { row ->
+                ScannerApListItem(
+                    row = row,
+                    isConnectedState = false,
+                    connectingApKey = connectingApKey,
+                    connectFailedApKeys = connectFailedApKeys,
+                    refreshingPasswordApKey = refreshingPasswordApKey,
+                    rootConnectAvailable = rootConnectAvailable,
+                    onConnectNetwork = onConnectNetwork,
+                    onResolvePassword = onResolvePassword,
+                    onRefreshPasswordForBssid = onRefreshPasswordForBssid,
+                    coroutineScope = coroutineScope,
+                    snackbarHostState = snackbarHostState,
+                    onOpenPasswordDialog = onOpenPasswordDialog
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ScannerApListItem(
     row: ScannerApRowModel,
     signalPercentOverride: Int? = null,
@@ -402,7 +517,7 @@ private fun ScannerApListItem(
         connectFailed = connectFailedApKeys.contains(apKey),
         connectEnabled = rootConnectAvailable,
         connectBlocked = connectingApKey != null || refreshingPasswordApKey != null,
-        passwordDisplay = row.passwordDisplay ?: onResolvePassword(ap.ssid, ap.bssid),
+        passwordDisplay = row.passwordDisplay ?: row.savedPassword,
         showRefreshPasswordButton = canRefreshByBssid && !isConnectedState,
         isRefreshingPassword = refreshingPasswordApKey == apKey,
         onRefreshPasswordClick = {
@@ -467,21 +582,15 @@ private fun WifiApRow(
     onConnectClick: () -> Unit,
     onEditPasswordClick: () -> Unit
 ) {
-    val cardBg = if (isConnectedState) {
-        Color(0xFF3B82F6) // A premium solid royal blue color to match the screenshot!
-    } else {
-        CardBackground
-    }
-    
-    val cardBorderBrush = if (isConnectedState) {
-        Brush.verticalGradient(
-            colors = listOf(
-                Color(0x8860A5FA),
-                Color(0x223B82F6)
+    val cardBg = if (isConnectedState) Color(0xFF3B82F6) else CardBackground
+    val cardBorderBrush = remember(isConnectedState) {
+        if (isConnectedState) {
+            Brush.verticalGradient(
+                colors = listOf(Color(0x8860A5FA), Color(0x223B82F6))
             )
-        )
-    } else {
-        null
+        } else {
+            null
+        }
     }
 
     val titleColor = if (isConnectedState) Color.White else TextPrimary

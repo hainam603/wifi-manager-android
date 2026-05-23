@@ -27,6 +27,7 @@ class WifiRepository(private val context: Context) {
     private var lastScanUsedCache = false
     private var lastSystemPasswordSyncAtMs = 0L
     private var rootAvailabilityCache: Boolean? = null
+    private var cachedSavedPasswords: Map<String, String>? = null
     private val sharedWifiRepository = SharedWifiRepository(context)
 
     companion object {
@@ -361,7 +362,24 @@ class WifiRepository(private val context: Context) {
         }
     }
 
-    fun getSavedWifiPasswords(): Map<String, String> {
+    private fun invalidateSavedPasswordCache() {
+        cachedSavedPasswords = null
+    }
+
+    private fun pruneCorruptedSavedPasswords(): Map<String, String> {
+        val loaded = loadSavedWifiPasswordsFromPrefs()
+        val cleaned = loaded.filter { (key, value) ->
+            val (_, storedBssid) = WifiCredentialKeys.parseStorageKey(key)
+            WifiCredentialKeys.isPlausibleWifiPassword(value, storedBssid)
+        }
+        if (cleaned.size != loaded.size) {
+            persistSavedWifiPasswords(cleaned)
+        }
+        cachedSavedPasswords = cleaned
+        return cleaned
+    }
+
+    private fun loadSavedWifiPasswordsFromPrefs(): Map<String, String> {
         val jsonStr = prefs.getString(KEY_SAVED_PASSWORDS, "{}") ?: "{}"
         val passwords = mutableMapOf<String, String>()
         try {
@@ -374,16 +392,20 @@ class WifiRepository(private val context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        val cleaned = passwords.filter { (key, value) ->
-            val (_, storedBssid) = WifiCredentialKeys.parseStorageKey(key)
-            WifiCredentialKeys.isPlausibleWifiPassword(value, storedBssid)
-        }
-        if (cleaned.size != passwords.size) {
-            val obj = JSONObject()
-            cleaned.forEach { (k, value) -> obj.put(k, value) }
-            prefs.edit().putString(KEY_SAVED_PASSWORDS, obj.toString()).apply()
-        }
-        return cleaned
+        return passwords
+    }
+
+    private fun persistSavedWifiPasswords(passwords: Map<String, String>) {
+        val obj = JSONObject()
+        passwords.forEach { (k, value) -> obj.put(k, value) }
+        prefs.edit().putString(KEY_SAVED_PASSWORDS, obj.toString()).apply()
+        invalidateSavedPasswordCache()
+    }
+
+    fun getSavedWifiPasswords(): Map<String, String> {
+        cachedSavedPasswords?.let { return it }
+        cachedSavedPasswords = loadSavedWifiPasswordsFromPrefs()
+        return cachedSavedPasswords!!
     }
 
     fun getSavedWifiPassword(ssid: String, bssid: String? = null): String? {
@@ -482,9 +504,7 @@ class WifiRepository(private val context: Context) {
         if (WifiCredentialKeys.isValidBssid(bssid)) {
             passwords.remove(ssid)
         }
-        val obj = JSONObject()
-        passwords.forEach { (k, value) -> obj.put(k, value) }
-        prefs.edit().putString(KEY_SAVED_PASSWORDS, obj.toString()).apply()
+        persistSavedWifiPasswords(passwords)
         addAllowedSsid(ssid)
         markAppManaged(ssid)
     }
@@ -502,9 +522,7 @@ class WifiRepository(private val context: Context) {
             keysToRemove.forEach { if (passwords.remove(it) != null) changed = true }
         }
         if (changed) {
-            val obj = JSONObject()
-            passwords.forEach { (k, value) -> obj.put(k, value) }
-            prefs.edit().putString(KEY_SAVED_PASSWORDS, obj.toString()).apply()
+            persistSavedWifiPasswords(passwords)
         }
     }
 
@@ -546,8 +564,7 @@ class WifiRepository(private val context: Context) {
                 passwords.remove(ssid)
             }
         }
-        val passwordObj = JSONObject()
-        passwords.forEach { (key, value) -> passwordObj.put(key, value) }
+        persistSavedWifiPasswords(passwords)
 
         val allowed = getAllowedSsids().toMutableSet()
         allowed.removeAll { ssid ->
@@ -561,7 +578,6 @@ class WifiRepository(private val context: Context) {
         }
 
         prefs.edit()
-            .putString(KEY_SAVED_PASSWORDS, passwordObj.toString())
             .putStringSet("allowed_ssids", allowed)
             .putStringSet(KEY_SYSTEM_CONNECTED_SSIDS, verifiedConnected)
             .apply()
@@ -681,11 +697,8 @@ class WifiRepository(private val context: Context) {
             lastSystemPasswordSyncAtMs = now
         }
 
-        val obj = JSONObject()
-        mergedPasswords.forEach { (key, value) -> obj.put(key, value) }
-        prefs.edit()
-            .putString(KEY_SAVED_PASSWORDS, obj.toString())
-            .apply()
+        persistSavedWifiPasswords(mergedPasswords)
+        pruneCorruptedSavedPasswords()
 
         // Chỉ dọn dữ liệu cũ khi đọc được danh sách hệ thống (tránh xóa nhầm khi API trả rỗng)
         if (fromConfigured.isNotEmpty() || (isRoot && shouldSyncRoot && systemSsids.isNotEmpty())) {
@@ -697,6 +710,24 @@ class WifiRepository(private val context: Context) {
 
     fun wasLastScanServedFromCache(): Boolean = lastScanUsedCache
 
+    fun getCachedScanResults(): List<WifiApInfo> = lastScanResults
+
+    @Suppress("DEPRECATION")
+    private fun waitForWifiScanResults(timeoutMs: Long = 4500L, pollMs: Long = 250L): List<android.net.wifi.ScanResult> {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var latest: List<android.net.wifi.ScanResult> = emptyList()
+        while (System.currentTimeMillis() < deadline) {
+            latest = wifiManager.scanResults.orEmpty()
+            if (latest.isNotEmpty()) return latest
+            try {
+                Thread.sleep(pollMs)
+            } catch (_: InterruptedException) {
+                break
+            }
+        }
+        return latest
+    }
+
     // Quét tìm danh sách các mạng WiFi khả dụng xung quanh
     @SuppressLint("MissingPermission")
     fun scanNearbyNetworks(forceRefresh: Boolean = false): List<WifiApInfo> {
@@ -707,18 +738,23 @@ class WifiRepository(private val context: Context) {
                 return lastScanResults
             }
 
-            // Đồng bộ hệ thống chỉ khi quét thật — tránh lag khi mở tab dùng cache
-            syncPasswordsFromSystem(forceRefresh = forceRefresh)
+            // Đồng bộ nhẹ — không đọc WifiConfigStore.xml mỗi lần bấm quét (rất chậm trên root)
+            syncPasswordsFromSystem(forceRefresh = false)
 
-            // Chỉ gọi startScan khi bắt buộc — giảm pin (Android giới hạn ~4 lần/2 phút)
             @Suppress("DEPRECATION")
-            if (forceRefresh) {
+            val scanResults = if (forceRefresh) {
                 wifiManager.startScan()
+                waitForWifiScanResults()
+            } else {
+                wifiManager.scanResults
             }
-            val scanResults = wifiManager.scanResults ?: return emptyList()
-            
+            if (scanResults.isNullOrEmpty()) {
+                lastScanUsedCache = true
+                return if (lastScanResults.isNotEmpty()) lastScanResults else emptyList()
+            }
+
             if (sharedWifiRepository.isEnabled()) {
-                sharedWifiRepository.refresh(force = forceRefresh)
+                sharedWifiRepository.refreshForScan(forceRefresh = forceRefresh)
             }
 
             val processed = scanResults

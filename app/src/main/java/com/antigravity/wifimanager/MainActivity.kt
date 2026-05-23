@@ -41,12 +41,16 @@ import com.antigravity.wifimanager.data.WifiRepository
 import com.antigravity.wifimanager.service.WifiMonitorService
 import com.antigravity.wifimanager.util.MonitorServiceStarter
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import com.antigravity.wifimanager.ui.screens.DashboardScreen
 import com.antigravity.wifimanager.ui.screens.HistoryScreen
 import com.antigravity.wifimanager.ui.screens.ScannerScreen
 import com.antigravity.wifimanager.ui.screens.SettingsScreen
-import com.antigravity.wifimanager.ui.scanner.rememberScannerDisplayState
+import com.antigravity.wifimanager.ui.scanner.ScannerDisplayState
+import com.antigravity.wifimanager.ui.scanner.ScannerUiMapper
 import com.antigravity.wifimanager.ui.theme.Slate950
 import com.antigravity.wifimanager.ui.theme.WifiManagerTheme
 import kotlinx.coroutines.flow.collectLatest
@@ -202,6 +206,25 @@ class MainActivity : ComponentActivity() {
         var isTogglingService by remember { mutableStateOf(false) }
         var isSavingPassword by remember { mutableStateOf(false) }
         var refreshingPasswordApKey by remember { mutableStateOf<String?>(null) }
+        var scannerDisplay by remember { mutableStateOf(ScannerDisplayState.Empty) }
+        var scannerConnectedSignal by remember { mutableIntStateOf(0) }
+        var scanJob by remember { mutableStateOf<Job?>(null) }
+        val scannerDisplayMutex = remember { Mutex() }
+
+        suspend fun rebuildScannerDisplay() {
+            val snapshot = connectionState
+            scannerDisplay = withContext(Dispatchers.IO) {
+                ScannerUiMapper.build(scannedList, snapshot) { ssid, bssid ->
+                    repository.resolveConnectionPassword(ssid, bssid)
+                }
+            }
+        }
+
+        LaunchedEffect(scannedList) {
+            scannerDisplayMutex.withLock {
+                rebuildScannerDisplay()
+            }
+        }
 
         fun updateScanStatusText() {
             val lastScanMs = repository.getLastScanAtMs()
@@ -230,6 +253,20 @@ class MainActivity : ComponentActivity() {
             sharedWifiOfflineStorageUsedMb = repository.getSharedWifiOfflineStorageMb()
         }
 
+        suspend fun reloadScannerFromCache() {
+            scannedList = withContext(Dispatchers.IO) {
+                repository.scanNearbyNetworks(forceRefresh = false)
+            }
+            scannerConnectedSignal = withContext(Dispatchers.IO) {
+                val s = repository.getCurrentConnectionState()
+                if (s.isConnected) s.signalPercent else 0
+            }
+            scannerDisplayMutex.withLock {
+                rebuildScannerDisplay()
+            }
+            updateScanStatusText()
+        }
+
         suspend fun refreshScannedNetworksAndWait(forceRefresh: Boolean = false) {
             if (isScanning || connectingApKey != null) return
             isScanning = true
@@ -240,22 +277,36 @@ class MainActivity : ComponentActivity() {
                 scannedList = withContext(Dispatchers.IO) {
                     repository.scanNearbyNetworks(forceRefresh = forceRefresh)
                 }
+                scannerDisplayMutex.withLock {
+                    rebuildScannerDisplay()
+                }
                 updateScanStatusText()
             } finally {
                 isScanning = false
             }
         }
 
-        fun refreshScannedNetworks(forceRefresh: Boolean = false) {
-            if (isScanning || connectingApKey != null) return
-            coroutineScope.launch {
-                refreshScannedNetworksAndWait(forceRefresh)
+        /** Chỉ gọi từ nút quét (FAB) — một luồng quét tại một thời điểm. */
+        fun startScanFromButton() {
+            if (connectingApKey != null) return
+            if (scanJob?.isActive == true) return
+            scanJob = coroutineScope.launch {
+                try {
+                    refreshScannedNetworksAndWait(forceRefresh = true)
+                    scannerConnectedSignal = withContext(Dispatchers.IO) {
+                        val s = repository.getCurrentConnectionState()
+                        if (s.isConnected) s.signalPercent else 0
+                    }
+                } finally {
+                    scanJob = null
+                }
             }
         }
 
         // Đồng bộ dữ liệu động từ Dịch vụ chạy ngầm khi được bind thành công
-        LaunchedEffect(wifiService, isServiceBound) {
+        LaunchedEffect(wifiService, isServiceBound, currentTab) {
             isServiceRunning = wifiService != null
+            if (currentTab != 0) return@LaunchedEffect
             wifiService?.let { service ->
                 service.connectionState.collectLatest { state ->
                     connectionState = state
@@ -271,8 +322,23 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 1 -> {
-                    refreshScannedNetworks(forceRefresh = false)
                     rootStatus = withContext(Dispatchers.IO) { repository.getRootStatus() }
+                    if (scannedList.isEmpty()) {
+                        val cached = withContext(Dispatchers.IO) { repository.getCachedScanResults() }
+                        if (cached.isNotEmpty()) {
+                            scannedList = cached
+                        }
+                    }
+                    if (scannedList.isNotEmpty()) {
+                        scannerDisplayMutex.withLock {
+                            rebuildScannerDisplay()
+                        }
+                        updateScanStatusText()
+                    }
+                    scannerConnectedSignal = withContext(Dispatchers.IO) {
+                        val s = repository.getCurrentConnectionState()
+                        if (s.isConnected) s.signalPercent else 0
+                    }
                 }
                 2 -> historyLogs = repository.getHistoryLogs()
                 3 -> {
@@ -386,7 +452,9 @@ class MainActivity : ComponentActivity() {
                             coroutineScope.launch {
                                 try {
                                     loadingMessage = "Đang quét WiFi và tải dữ liệu..."
-                                    refreshScannedNetworksAndWait(forceRefresh = true)
+                                    if (scanJob?.isActive != true) {
+                                        refreshScannedNetworksAndWait(forceRefresh = true)
+                                    }
                                     connectionState = withContext(Dispatchers.IO) {
                                         repository.getCurrentConnectionState()
                                     }
@@ -432,14 +500,9 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                     1 -> {
-                        val scannerDisplay = rememberScannerDisplayState(
-                            networks = scannedList,
-                            connection = connectionState,
-                            resolvePassword = { ssid, bssid ->
-                                repository.resolveConnectionPassword(ssid, bssid)
-                            }
-                        )
                         ScannerScreen(
+                        networks = scannedList,
+                        connectionState = connectionState,
                         displayState = scannerDisplay,
                         networkCount = scannedList.size,
                         scanStatusText = scanStatusText,
@@ -449,10 +512,8 @@ class MainActivity : ComponentActivity() {
                         rootConnectAvailable = rootStatus == RootStatus.GRANTED,
                         isPasswordBusy = isSavingPassword,
                         refreshingPasswordApKey = refreshingPasswordApKey,
-                        connectedSignalPercent = connectionState.signalPercent,
-                        onRefreshScan = {
-                            refreshScannedNetworks(forceRefresh = true)
-                        },
+                        connectedSignalPercent = scannerConnectedSignal,
+                        onRefreshScan = { startScanFromButton() },
                          onConnectNetwork = { ssid, bssid ->
                             if (connectingApKey != null || isScanning) return@ScannerScreen
                             if (rootStatus != RootStatus.GRANTED) {
@@ -486,12 +547,17 @@ class MainActivity : ComponentActivity() {
                                     connectingApKey = null
                                 }
                                 connectionState = repository.getCurrentConnectionState()
+                                scannerConnectedSignal = if (connectionState.isConnected) {
+                                    connectionState.signalPercent
+                                } else {
+                                    0
+                                }
                                 if (result.success) {
                                     connectFailedApKeys = connectFailedApKeys - key
                                 } else {
                                     connectFailedApKeys = connectFailedApKeys + key
                                 }
-                                refreshScannedNetworksAndWait(forceRefresh = true)
+                                reloadScannerFromCache()
                                 val updatedAp = scannedList.find {
                                     it.ssid == ssid && it.bssid.equals(bssid, ignoreCase = true)
                                 } ?: scannedList.find { it.ssid == ssid }
@@ -516,7 +582,7 @@ class MainActivity : ComponentActivity() {
                                         repository.saveWifiPassword(ssid, password, bssid)
                                         repository.suggestNetworks(repository.getAllowedSsids().toList())
                                     }
-                                    refreshScannedNetworksAndWait(forceRefresh = true)
+                                    reloadScannerFromCache()
                                 } finally {
                                     isSavingPassword = false
                                 }
@@ -530,7 +596,7 @@ class MainActivity : ComponentActivity() {
                                     withContext(Dispatchers.IO) {
                                         repository.forgetNetwork(ssid, bssid)
                                     }
-                                    refreshScannedNetworksAndWait(forceRefresh = true)
+                                    reloadScannerFromCache()
                                 } finally {
                                     isSavingPassword = false
                                 }
@@ -546,7 +612,7 @@ class MainActivity : ComponentActivity() {
                                 val result = withContext(Dispatchers.IO) {
                                     repository.refreshSharedPasswordForBssid(ssid, bssid)
                                 }
-                                refreshScannedNetworksAndWait(forceRefresh = false)
+                                reloadScannerFromCache()
                                 result
                             } finally {
                                 refreshingPasswordApKey = null
@@ -641,7 +707,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     sharedWifiOfflineCount = 0
                                     sharedWifiOfflineStorageUsedMb = 0.0
-                                    refreshScannedNetworksAndWait(forceRefresh = true)
+                                    if (currentTab == 1) reloadScannerFromCache()
                                     ToastHelper.show(
                                         this@MainActivity,
                                         "Đã xóa bộ nhớ WiFi offline",
@@ -669,7 +735,7 @@ class MainActivity : ComponentActivity() {
                                 sharedWifiOfflineCount = repository.getSharedWifiOfflineCount()
                                 sharedWifiOfflineStorageUsedMb = repository.getSharedWifiOfflineStorageMb()
                                 if (currentTab == 1) {
-                                    refreshScannedNetworks(forceRefresh = true)
+                                    reloadScannerFromCache()
                                 }
                                 val msg = when {
                                     result.skipped -> result.reason ?: "Không tải được"
@@ -700,7 +766,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     rootStatus = if (granted) RootStatus.GRANTED else repository.getRootStatus()
                                     if (granted && currentTab == 1) {
-                                        refreshScannedNetworksAndWait(forceRefresh = false)
+                                        reloadScannerFromCache()
                                     }
                                     val msg = when (rootStatus) {
                                         RootStatus.GRANTED -> "Root đã được cấp!"
