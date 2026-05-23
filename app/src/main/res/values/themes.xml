@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.WifiManager" parent="@android:style/Theme.Material.NoActionBar">
+        <!-- Tùy chỉnh màu sắc thanh trạng thái để tương thích giao diện tối -->
+        <item name="android:statusBarColor">#0F172A</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

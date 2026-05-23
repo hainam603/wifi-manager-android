@@ -1,0 +1,30 @@
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Local configuration
+local.properties
+*.iml
+.idea/
+.DS_Store
+
+# Android Studio
+/captures
+.externalNativeBuild
+.cxx/
+
+# Keystore (never commit)
+*.jks
+*.keystore
+
+# Logs
+*.log
+
+# Cursor / IDE
+.cursor/
