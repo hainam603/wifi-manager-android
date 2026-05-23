@@ -265,6 +265,11 @@ class MainActivity : ComponentActivity() {
 
         LaunchedEffect(currentTab) {
             when (currentTab) {
+                0 -> {
+                    connectionState = withContext(Dispatchers.IO) {
+                        repository.refreshCurrentConnectionFromEnvironment(forceScan = false)
+                    }
+                }
                 1 -> {
                     refreshScannedNetworks(forceRefresh = false)
                     rootStatus = withContext(Dispatchers.IO) { repository.getRootStatus() }
@@ -326,6 +331,14 @@ class MainActivity : ComponentActivity() {
                 when (currentTab) {
                     0 -> DashboardScreen(
                         state = connectionState,
+                        wifiPassword = if (connectionState.isConnected) {
+                            repository.resolveConnectionPassword(
+                                connectionState.ssid,
+                                connectionState.bssid.takeIf { it.isNotBlank() }
+                            )
+                        } else {
+                            null
+                        },
                         isServiceRunning = isServiceRunning,
                         isManualScanLoading = loadingMessage != null,
                         isTogglingService = isTogglingService,
@@ -374,7 +387,9 @@ class MainActivity : ComponentActivity() {
                                 try {
                                     loadingMessage = "Đang quét WiFi và tải dữ liệu..."
                                     refreshScannedNetworksAndWait(forceRefresh = true)
-                                    connectionState = repository.getCurrentConnectionState()
+                                    connectionState = withContext(Dispatchers.IO) {
+                                        repository.getCurrentConnectionState()
+                                    }
 
                                     if (!connectionState.isConnected) {
                                         ToastHelper.show(
@@ -401,7 +416,9 @@ class MainActivity : ComponentActivity() {
                                         currentState = connectionState,
                                         enforceCooldown = false
                                     )
-                                    connectionState = repository.getCurrentConnectionState()
+                                    connectionState = withContext(Dispatchers.IO) {
+                                        repository.getCurrentConnectionState()
+                                    }
                                     historyLogs = repository.getHistoryLogs()
 
                                     ToastHelper.show(
@@ -417,7 +434,10 @@ class MainActivity : ComponentActivity() {
                     1 -> {
                         val scannerDisplay = rememberScannerDisplayState(
                             networks = scannedList,
-                            connection = connectionState
+                            connection = connectionState,
+                            resolvePassword = { ssid, bssid ->
+                                repository.resolveConnectionPassword(ssid, bssid)
+                            }
                         )
                         ScannerScreen(
                         displayState = scannerDisplay,

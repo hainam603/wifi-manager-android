@@ -11,6 +11,7 @@ import android.net.wifi.WifiNetworkSuggestion
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.Inet4Address
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -162,14 +163,116 @@ class WifiRepository(private val context: Context) {
             0
         }
 
-        return WifiConnectionState(
-            ssid = ssid,
-            bssid = bssid.ifEmpty { "00:00:00:00:00:00" },
-            signalPercent = percent,
-            authType = "WPA2/WPA3 Personal",
-            isConnected = true,
-            frequencyMhz = frequencyMhz
+        val (ipAddress, dnsServers) = readActiveNetworkLinkInfo(activeNetwork)
+
+        return enrichConnectionFromScan(
+            WifiConnectionState(
+                ssid = ssid,
+                bssid = bssid,
+                signalPercent = percent,
+                authType = formatSecurityLabel(scanResultsSecurityForSsid(ssid)).ifBlank { "WPA2/WPA3" },
+                isConnected = true,
+                frequencyMhz = frequencyMhz,
+                ipAddress = ipAddress,
+                dnsServers = dnsServers
+            )
         )
+    }
+
+    private fun readActiveNetworkLinkInfo(activeNetwork: android.net.Network): Pair<String, String> {
+        return try {
+            val linkProperties = connectivityManager.getLinkProperties(activeNetwork) ?: return "" to ""
+            val ip = linkProperties.linkAddresses
+                .firstOrNull { it.address is Inet4Address }
+                ?.address?.hostAddress
+                ?: linkProperties.linkAddresses.firstOrNull()?.address?.hostAddress
+                ?: ""
+            val dns = linkProperties.dnsServers
+                .mapNotNull { it.hostAddress?.takeIf { addr -> addr.isNotBlank() } }
+                .joinToString("\n")
+            ip to dns
+        } catch (_: Exception) {
+            "" to ""
+        }
+    }
+
+    /**
+     * Cập nhật trạng thái kết nối hiện tại; tùy chọn quét trước để lấy BSSID/RSSI thật từ scanResults.
+     */
+    @SuppressLint("MissingPermission")
+    fun refreshCurrentConnectionFromEnvironment(forceScan: Boolean = false): WifiConnectionState {
+        if (forceScan || lastScanResults.isEmpty() ||
+            System.currentTimeMillis() - lastScanAtMs > SCAN_CACHE_WINDOW_MS
+        ) {
+            scanNearbyNetworks(forceRefresh = forceScan)
+        }
+        return getCurrentConnectionState()
+    }
+
+    private fun enrichConnectionFromScan(state: WifiConnectionState): WifiConnectionState {
+        if (!state.isConnected || state.ssid.isBlank()) return state
+
+        val candidates = lastScanResults.filter { ssidsMatch(it.ssid, state.ssid) }
+        if (candidates.isEmpty()) return state
+
+        val best = selectConnectedApCandidate(candidates, state.frequencyMhz) ?: return state
+
+        var updated = state
+        if (WifiCredentialKeys.isPlaceholderBssid(state.bssid) &&
+            WifiCredentialKeys.isValidBssid(best.bssid)
+        ) {
+            updated = updated.copy(bssid = best.bssid)
+        }
+        if (best.signalPercent > 0) {
+            updated = updated.copy(signalPercent = best.signalPercent)
+        }
+        if (state.frequencyMhz <= 0 && best.frequencyMhz > 0) {
+            updated = updated.copy(frequencyMhz = best.frequencyMhz)
+        }
+        val securityLabel = formatSecurityLabel(best.securityType)
+        if (securityLabel.isNotBlank()) {
+            updated = updated.copy(authType = securityLabel)
+        }
+        return updated
+    }
+
+    private fun selectConnectedApCandidate(
+        candidates: List<WifiApInfo>,
+        connectedFrequencyMhz: Int
+    ): WifiApInfo? {
+        if (candidates.isEmpty()) return null
+        if (candidates.size == 1) return candidates.first()
+
+        val on5Ghz = connectedFrequencyMhz >= 4900
+        val on24Ghz = connectedFrequencyMhz in 2400..2500
+
+        val bandFiltered = when {
+            on5Ghz -> candidates.filter { it.is5GHz }.ifEmpty { candidates }
+            on24Ghz -> candidates.filter { !it.is5GHz }.ifEmpty { candidates }
+            else -> candidates
+        }
+        return bandFiltered.maxByOrNull { it.signalPercent }
+    }
+
+    private fun formatSecurityLabel(capabilities: String): String {
+        val cap = capabilities.trim()
+        if (cap.isBlank() || cap.equals("Open", ignoreCase = true)) return "Mở"
+        return when {
+            cap.contains("SAE", ignoreCase = true) || cap.contains("WPA3", ignoreCase = true) ->
+                "WPA3"
+            cap.contains("WPA2", ignoreCase = true) -> "WPA2"
+            cap.contains("WPA", ignoreCase = true) -> "WPA/WPA2"
+            else -> cap.take(40)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun scanResultsSecurityForSsid(ssid: String?): String {
+        if (ssid.isNullOrBlank()) return ""
+        return wifiManager.scanResults
+            ?.firstOrNull { it.SSID == ssid }
+            ?.capabilities
+            .orEmpty()
     }
 
     fun normalizeSsidKey(ssid: String): String {
@@ -265,24 +368,39 @@ class WifiRepository(private val context: Context) {
             val obj = JSONObject(jsonStr)
             val keys = obj.keys()
             while (keys.hasNext()) {
-                val ssid = keys.next()
-                passwords[ssid] = obj.optString(ssid, "")
+                val key = keys.next()
+                passwords[key] = obj.optString(key, "")
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return passwords
+        val cleaned = passwords.filter { (key, value) ->
+            val (_, storedBssid) = WifiCredentialKeys.parseStorageKey(key)
+            WifiCredentialKeys.isPlausibleWifiPassword(value, storedBssid)
+        }
+        if (cleaned.size != passwords.size) {
+            val obj = JSONObject()
+            cleaned.forEach { (k, value) -> obj.put(k, value) }
+            prefs.edit().putString(KEY_SAVED_PASSWORDS, obj.toString()).apply()
+        }
+        return cleaned
     }
 
     fun getSavedWifiPassword(ssid: String, bssid: String? = null): String? {
         val passwords = getSavedWifiPasswords()
         if (WifiCredentialKeys.isValidBssid(bssid)) {
-            passwords[WifiCredentialKeys.storageKey(ssid, bssid)]?.let { return it }
+            passwords[WifiCredentialKeys.storageKey(ssid, bssid)]
+                ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
+                ?.let { return it }
         }
-        return passwords[ssid] ?: passwords.entries.firstOrNull { (key, _) ->
+        passwords[ssid]
+            ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
+            ?.let { return it }
+        return passwords.entries.firstOrNull { (key, value) ->
             val (storedSsid, storedBssid) = WifiCredentialKeys.parseStorageKey(key)
             storedSsid.equals(ssid, ignoreCase = true) &&
-                WifiCredentialKeys.normalizeBssid(storedBssid).isEmpty()
+                WifiCredentialKeys.normalizeBssid(storedBssid).isEmpty() &&
+                WifiCredentialKeys.isPlausibleWifiPassword(value, bssid)
         }?.value
     }
 
@@ -357,6 +475,7 @@ class WifiRepository(private val context: Context) {
 
     fun saveWifiPassword(ssid: String, password: String, bssid: String? = null) {
         if (ssid.isBlank()) return
+        if (!WifiCredentialKeys.isPlausibleWifiPassword(password, bssid)) return
         val passwords = getSavedWifiPasswords().toMutableMap()
         val key = WifiCredentialKeys.storageKey(ssid, bssid)
         passwords[key] = password
@@ -435,10 +554,16 @@ class WifiRepository(private val context: Context) {
             ssid !in systemSsids && !isAppManaged(ssid) && ssid != connectedSsid
         }
 
+        val verifiedConnected = (prefs.getStringSet(KEY_SYSTEM_CONNECTED_SSIDS, emptySet()) ?: emptySet())
+            .toMutableSet()
+        verifiedConnected.removeAll { ssid ->
+            ssid !in systemSsids && !isAppManaged(ssid) && ssid != connectedSsid
+        }
+
         prefs.edit()
             .putString(KEY_SAVED_PASSWORDS, passwordObj.toString())
             .putStringSet("allowed_ssids", allowed)
-            .putStringSet(KEY_SYSTEM_CONNECTED_SSIDS, systemSsids)
+            .putStringSet(KEY_SYSTEM_CONNECTED_SSIDS, verifiedConnected)
             .apply()
     }
 
@@ -506,6 +631,13 @@ class WifiRepository(private val context: Context) {
         return emptyMap()
     }
 
+    /** Chỉ tin mạng hệ thống đã từng kết nối thành công (hoặc do app quản lý). */
+    private fun shouldTrustSystemSavedSsid(ssid: String, configs: Map<String, SystemWifiConfig>): Boolean {
+        if (hasSavedWifiPassword(ssid) || isAppManaged(ssid) || isSystemConnectedSsid(ssid)) return true
+        val cfg = configs[ssid] ?: return false
+        return cfg.hasEverConnected
+    }
+
     fun syncPasswordsFromSystem(forceRefresh: Boolean = false) {
         if (forceRefresh) {
             rootAvailabilityCache = null
@@ -514,19 +646,28 @@ class WifiRepository(private val context: Context) {
         val fromConfigured = readSystemSavedSsids()
         val systemSsids = fromConfigured.toMutableSet()
 
-        systemSsids.forEach { ssid ->
-            addAllowedSsid(ssid)
-        }
-
         val mergedPasswords = getSavedWifiPasswords().toMutableMap()
         val isRoot = isRootAvailable()
 
         val now = System.currentTimeMillis()
         val shouldSyncRoot = forceRefresh || (now - lastSystemPasswordSyncAtMs >= SYSTEM_PASSWORD_SYNC_WINDOW_MS)
 
+        val rootConfigs = if (isRoot && shouldSyncRoot) {
+            readSystemWifiConfigsFromRoot()
+        } else {
+            emptyMap()
+        }
+
+        fromConfigured.forEach { ssid ->
+            if (shouldTrustSystemSavedSsid(ssid, rootConfigs)) {
+                addAllowedSsid(ssid)
+            } else if (!hasSavedWifiPassword(ssid) && !isAppManaged(ssid)) {
+                removeAllowedSsid(ssid)
+            }
+        }
+
         if (isRoot && shouldSyncRoot) {
-            val configs = readSystemWifiConfigsFromRoot()
-            configs.values.forEach { cfg ->
+            rootConfigs.values.forEach { cfg ->
                 if (!cfg.hasEverConnected) return@forEach
                 val trustedBySystem = fromConfigured.isEmpty() || cfg.ssid in fromConfigured
                 if (!trustedBySystem) return@forEach
@@ -544,7 +685,6 @@ class WifiRepository(private val context: Context) {
         mergedPasswords.forEach { (key, value) -> obj.put(key, value) }
         prefs.edit()
             .putString(KEY_SAVED_PASSWORDS, obj.toString())
-            .putStringSet(KEY_SYSTEM_CONNECTED_SSIDS, systemSsids)
             .apply()
 
         // Chỉ dọn dữ liệu cũ khi đọc được danh sách hệ thống (tránh xóa nhầm khi API trả rỗng)
@@ -823,7 +963,8 @@ class WifiRepository(private val context: Context) {
         bssid: String? = null
     ): ConnectResult {
         val requiresPassword = requiresPasswordFromHint(securityHint)
-        val explicitPassword = password?.trim()?.takeIf { it.isNotEmpty() && !isWifiCapabilitiesString(it) }
+        val explicitPassword = password?.trim()
+            ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
         val psk = resolveConnectionPassword(ssid, password, bssid)
         val hasSystemProfile = isSystemConnectedSsid(ssid)
         val sharedCred = sharedWifiRepository.findSharedCredential(ssid, bssid, this)
@@ -845,10 +986,6 @@ class WifiRepository(private val context: Context) {
             )
         }
 
-        if (!psk.isNullOrBlank()) {
-            saveWifiPassword(ssid, psk, bssid)
-        }
-
         if (!isRootAvailable()) {
             return ConnectResult(
                 success = false,
@@ -856,16 +993,23 @@ class WifiRepository(private val context: Context) {
             )
         }
 
-        suggestNetworkWithPassword(ssid, psk, securityHint)
+        val existedInSystemBefore = readSystemSavedSsids().contains(ssid)
         connectToSsidViaRoot(ssid, psk, securityHint)
 
         return if (waitUntilConnectedTo(ssid, timeoutMs = 12_000)) {
+            if (!psk.isNullOrBlank()) {
+                saveWifiPassword(ssid, psk, bssid)
+            }
             markSystemConnectedSsid(ssid)
+            suggestNetworkWithPassword(ssid, psk, securityHint)
             ConnectResult(
                 success = true,
                 message = "Kết nối thành công: $ssid"
             )
         } else {
+            if (!existedInSystemBefore) {
+                forgetNetworkFromSystemViaRoot(ssid)
+            }
             val attemptedPassword = psk.orEmpty()
             val fromSharedApi = attemptedPassword.isNotBlank() &&
                 sharedWifiRepository.matchesSharedApiPassword(
@@ -921,6 +1065,17 @@ class WifiRepository(private val context: Context) {
         val set = prefs.getStringSet(KEY_SYSTEM_CONNECTED_SSIDS, emptySet())?.toMutableSet() ?: mutableSetOf()
         set.add(ssid)
         prefs.edit().putStringSet(KEY_SYSTEM_CONNECTED_SSIDS, set).apply()
+    }
+
+    /** Gỡ profile WiFi hệ thống do lần thử kết nối vừa tạo (khi thất bại). */
+    private fun forgetNetworkFromSystemViaRoot(ssid: String) {
+        if (!isRootAvailable() || ssid.isBlank()) return
+        try {
+            val qSsid = shellQuote(ssid.trim())
+            execRootShellScript("cmd wifi forget-network $qSsid;")
+        } catch (_: Exception) {
+            // Bỏ qua nếu thiết bị không hỗ trợ forget-network
+        }
     }
 
     fun releaseSpecifierConnection() {
@@ -981,26 +1136,27 @@ class WifiRepository(private val context: Context) {
         return current.trim().equals(target.trim(), ignoreCase = true)
     }
 
-    /** Gộp mật khẩu từ app, mạng tương tự, hoặc đồng bộ hệ thống — không nhầm với chuỗi capabilities. */
+    /** Gộp mật khẩu từ app, mạng tương tự, hoặc đồng bộ hệ thống — không nhầm BSSID/capabilities với mật khẩu. */
     fun resolveConnectionPassword(
         ssid: String,
         explicitPassword: String? = null,
         bssid: String? = null
     ): String? {
         explicitPassword?.trim()
-            ?.takeIf { it.isNotEmpty() && !isWifiCapabilitiesString(it) }
+            ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
             ?.let { return it }
-        getSavedWifiPassword(ssid, bssid)?.trim()?.takeIf { it.isNotEmpty() }
+        getSavedWifiPassword(ssid, bssid)?.trim()
+            ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
             ?.takeUnless { sharedWifiRepository.isPasswordRejected(ssid, bssid, it) }
             ?.let { return it }
-        getSimilarSsidWithSavedPassword(ssid)?.second?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+        getSimilarSsidWithSavedPassword(ssid)?.second?.trim()
+            ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
+            ?.let { return it }
         sharedWifiRepository.resolvePassword(ssid, bssid, this)
-            ?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+            ?.trim()
+            ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
+            ?.let { return it }
         return null
-    }
-
-    private fun isWifiCapabilitiesString(value: String): Boolean {
-        return value.contains('[') && value.contains(']')
     }
 
     private fun securityTypesFromHint(securityHint: String?): List<String> {
@@ -1062,11 +1218,6 @@ class WifiRepository(private val context: Context) {
                 append("cmd wifi set-wifi-enabled enabled; ")
                 append("cmd wifi disconnect; ")
                 append("sleep 1; ")
-                if (psk.isNotEmpty()) {
-                    for (type in securityTypes) {
-                        append("cmd wifi add-network $qSsid $type ${shellQuote(psk)}; ")
-                    }
-                }
                 for (type in securityTypes) {
                     if (psk.isNotEmpty()) {
                         append("cmd wifi connect-network $qSsid $type ${shellQuote(psk)}; ")
@@ -1098,7 +1249,7 @@ class WifiRepository(private val context: Context) {
         if (normalizedTarget.isEmpty()) return null
 
         for ((key, value) in passwords) {
-            if (value.isBlank()) continue
+            if (!WifiCredentialKeys.isPlausibleWifiPassword(value)) continue
             val (storedSsid, _) = WifiCredentialKeys.parseStorageKey(key)
             if (storedSsid.equals(ssid, ignoreCase = true)) continue
             val normalizedKey = storedSsid.lowercase()

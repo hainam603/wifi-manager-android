@@ -7,7 +7,9 @@ data class WifiConnectionState(
     val signalPercent: Int = 0,
     val authType: String = "",
     val isConnected: Boolean = false,
-    val frequencyMhz: Int = 0
+    val frequencyMhz: Int = 0,
+    val ipAddress: String = "",
+    val dnsServers: String = ""
 ) {
     val is5GHz: Boolean
         get() = frequencyMhz >= 4900

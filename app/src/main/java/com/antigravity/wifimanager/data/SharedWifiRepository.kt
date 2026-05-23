@@ -182,11 +182,12 @@ class SharedWifiRepository(private val context: Context) {
             frequencyMhz = 0,
             securityType = ""
         )
-        return findMatch(ap, wifiRepository)?.password?.takeUnless { password ->
-            isPasswordRejected(ap.ssid, ap.bssid, password)
-        } ?: getSharedPassword(ssid, bssid)?.takeUnless { password ->
-            isPasswordRejected(ssid, bssid, password)
-        }
+        return findMatch(ap, wifiRepository)?.password
+            ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, ap.bssid) }
+            ?.takeUnless { password -> isPasswordRejected(ap.ssid, ap.bssid, password) }
+            ?: getSharedPassword(ssid, bssid)
+                ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
+                ?.takeUnless { password -> isPasswordRejected(ssid, bssid, password) }
     }
 
     fun isPasswordRejected(ssid: String, bssid: String?, password: String): Boolean =

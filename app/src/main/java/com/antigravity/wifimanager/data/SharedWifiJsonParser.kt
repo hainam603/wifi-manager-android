@@ -60,7 +60,9 @@ object SharedWifiJsonParser {
             item.optString("security.password"),
             item.optNestedString("security", "password")
         )
+        val bssid = parseBssid(item)
         if (ssid.isBlank() || password.isBlank()) return null
+        if (!WifiCredentialKeys.isPlausibleWifiPassword(password, bssid)) return null
 
         val apLat = item.optDouble("location.latitude", Double.NaN).takeIf { !it.isNaN() }
             ?: item.optNestedDouble("location", "latitude")
@@ -80,7 +82,7 @@ object SharedWifiJsonParser {
         return SharedWifiCredential(
             ssid = ssid,
             password = password,
-            bssid = parseBssid(item),
+            bssid = bssid,
             providerName = firstNonBlank(
                 item.optString("provider"),
                 item.optString("user.name"),

@@ -10,7 +10,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -22,8 +21,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import com.antigravity.wifimanager.data.WifiApInfo
 import com.antigravity.wifimanager.data.WifiCredentialKeys
 import com.antigravity.wifimanager.data.WifiCredentialRefreshResult
@@ -61,7 +58,6 @@ fun ScannerScreen(
     var passwordDialogBssid by remember { mutableStateOf<String?>(null) }
     var passwordDialogSimilarSsid by remember { mutableStateOf<String?>(null) }
     var passwordInput by remember { mutableStateOf("") }
-    var passwordVisible by remember { mutableStateOf(false) }
     val connectedRow = displayState.connectedRow
     val savedRows = displayState.savedRows
     val nearbyRows = displayState.nearbyRows
@@ -185,7 +181,6 @@ fun ScannerScreen(
                                     passwordDialogBssid = bssid
                                     passwordDialogSimilarSsid = similarSsid
                                     passwordInput = initial
-                                    passwordVisible = true
                                 }
                             )
                         }
@@ -223,7 +218,6 @@ fun ScannerScreen(
                                     passwordDialogBssid = bssid
                                     passwordDialogSimilarSsid = similarSsid
                                     passwordInput = initial
-                                    passwordVisible = true
                                 }
                             )
                         }
@@ -261,7 +255,6 @@ fun ScannerScreen(
                                     passwordDialogBssid = bssid
                                     passwordDialogSimilarSsid = similarSsid
                                     passwordInput = initial
-                                    passwordVisible = true
                                 }
                             )
                         }
@@ -295,21 +288,7 @@ fun ScannerScreen(
                             onValueChange = { passwordInput = it },
                             modifier = Modifier.fillMaxWidth(),
                             label = { Text("Mật khẩu") },
-                            singleLine = true,
-                            readOnly = savedPassword != null && !passwordVisible,
-                            visualTransformation = if (passwordVisible) {
-                                VisualTransformation.None
-                            } else {
-                                PasswordVisualTransformation()
-                            },
-                            trailingIcon = {
-                                IconButton(onClick = { passwordVisible = !passwordVisible }) {
-                                    Icon(
-                                        imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                        contentDescription = null
-                                    )
-                                }
-                            }
+                            singleLine = true
                         )
                         val similarSsid = passwordDialogSimilarSsid
                         if (savedPassword.isNullOrEmpty() && !similarSsid.isNullOrBlank()) {
@@ -320,13 +299,7 @@ fun ScannerScreen(
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
-                        if (savedPassword != null && !passwordVisible) {
-                            Text(
-                                text = "Mật khẩu đang được ẩn. Bấm biểu tượng mắt để xem hoặc sửa.",
-                                fontSize = 12.sp,
-                                color = TextSecondary
-                            )
-                        } else if (savedPassword.isNullOrEmpty() && hasSystemCredential) {
+                        if (savedPassword.isNullOrEmpty() && hasSystemCredential) {
                             Text(
                                 text = "Mạng này đã có thông tin đăng nhập trong hệ thống. Bạn có thể lưu mật khẩu thủ công để app dùng trực tiếp.",
                                 fontSize = 12.sp,
@@ -429,7 +402,7 @@ private fun ScannerApListItem(
         connectFailed = connectFailedApKeys.contains(apKey),
         connectEnabled = rootConnectAvailable,
         connectBlocked = connectingApKey != null || refreshingPasswordApKey != null,
-        passwordDisplay = row.passwordDisplay,
+        passwordDisplay = row.passwordDisplay ?: onResolvePassword(ap.ssid, ap.bssid),
         showRefreshPasswordButton = canRefreshByBssid && !isConnectedState,
         isRefreshingPassword = refreshingPasswordApKey == apKey,
         onRefreshPasswordClick = {
@@ -642,8 +615,7 @@ private fun WifiApRow(
                         text = "Mật khẩu: $passwordDisplay",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (isConnectedState) Color(0xFFE0F2FE) else Accent,
-                        maxLines = 3
+                        color = if (isConnectedState) Color(0xFFE0F2FE) else Accent
                     )
                 }
 

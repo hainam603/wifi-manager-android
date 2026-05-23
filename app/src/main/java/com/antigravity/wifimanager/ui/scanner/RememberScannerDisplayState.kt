@@ -9,7 +9,8 @@ import com.antigravity.wifimanager.data.WifiConnectionState
 @Composable
 fun rememberScannerDisplayState(
     networks: List<WifiApInfo>,
-    connection: WifiConnectionState
+    connection: WifiConnectionState,
+    resolvePassword: (ssid: String, bssid: String?) -> String? = { _, _ -> null }
 ): ScannerDisplayState {
     val connSsid = connection.ssid
     val connBssid = connection.bssid
@@ -23,6 +24,6 @@ fun rememberScannerDisplayState(
         connFreq,
         connConnected
     ) {
-        ScannerUiMapper.build(networks, connection)
+        ScannerUiMapper.build(networks, connection, resolvePassword)
     }
 }

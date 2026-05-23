@@ -18,6 +18,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.antigravity.wifimanager.data.WifiConnectionState
+import com.antigravity.wifimanager.data.WifiCredentialKeys
 import com.antigravity.wifimanager.ui.components.GaugeView
 import com.antigravity.wifimanager.ui.components.GlassCard
 import com.antigravity.wifimanager.ui.components.WifiBandBadge
@@ -26,6 +27,7 @@ import com.antigravity.wifimanager.ui.theme.TextSecondary
 @Composable
 fun DashboardScreen(
     state: WifiConnectionState,
+    wifiPassword: String? = null,
     isServiceRunning: Boolean,
     isManualScanLoading: Boolean = false,
     isTogglingService: Boolean = false,
@@ -140,10 +142,16 @@ fun DashboardScreen(
                             }
                         }
                         Text(
-                            text = if (state.isConnected) "BSSID: ${state.bssid}" else "Vui lòng bật WiFi hoặc kết nối",
+                            text = when {
+                                !state.isConnected -> "Vui lòng bật WiFi hoặc kết nối"
+                                WifiCredentialKeys.isPlaceholderBssid(state.bssid) ->
+                                    "BSSID: chưa đọc được — bấm Quét lại"
+                                state.bssid.isBlank() -> "BSSID: —"
+                                else -> "BSSID: ${state.bssid}"
+                            },
                             fontSize = 12.sp,
                             color = TextSecondary,
-                            maxLines = 1,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
@@ -186,6 +194,41 @@ fun DashboardScreen(
                                 else Color(0xFFEF4444)
                             } else TextSecondary
                         )
+                    }
+                }
+
+                if (state.isConnected) {
+                    Divider(color = Color(0x11FFFFFF))
+
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Column {
+                            Text(text = "Địa chỉ IP", fontSize = 12.sp, color = TextSecondary)
+                            Text(
+                                text = state.ipAddress.ifBlank { "—" },
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Column {
+                            Text(text = "DNS", fontSize = 12.sp, color = TextSecondary)
+                            Text(
+                                text = state.dnsServers.ifBlank { "—" },
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                lineHeight = 20.sp
+                            )
+                        }
+
+                        Column {
+                            Text(text = "Mật khẩu WiFi", fontSize = 12.sp, color = TextSecondary)
+                            Text(
+                                text = wifiPassword?.takeIf { it.isNotBlank() } ?: "—",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
             }

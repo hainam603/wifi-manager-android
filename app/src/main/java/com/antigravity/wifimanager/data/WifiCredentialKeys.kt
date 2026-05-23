@@ -6,12 +6,28 @@ import java.util.Locale
 object WifiCredentialKeys {
 
     private const val SEPARATOR = "|"
-    private const val PLACEHOLDER_BSSID = "02:00:00:00:00:00"
+    private val MAC_ADDRESS_PATTERN = Regex(
+        "^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$",
+        RegexOption.IGNORE_CASE
+    )
+    private val PLACEHOLDER_BSSIDS = setOf(
+        "02:00:00:00:00:00",
+        "00:00:00:00:00:00"
+    )
 
     fun normalizeBssid(bssid: String?): String {
         val raw = bssid?.trim().orEmpty()
-        if (raw.isBlank() || raw.equals(PLACEHOLDER_BSSID, ignoreCase = true)) return ""
-        return raw.lowercase(Locale.getDefault())
+        if (raw.isBlank()) return ""
+        val lower = raw.lowercase(Locale.getDefault())
+        if (PLACEHOLDER_BSSIDS.contains(lower)) return ""
+        if (lower.replace(":", "").replace("0", "").isEmpty()) return ""
+        return lower
+    }
+
+    fun isPlaceholderBssid(bssid: String?): Boolean {
+        val raw = bssid?.trim().orEmpty()
+        if (raw.isBlank()) return true
+        return normalizeBssid(raw).isEmpty()
     }
 
     fun isValidBssid(bssid: String?): Boolean = normalizeBssid(bssid).isNotEmpty()
@@ -36,4 +52,21 @@ object WifiCredentialKeys {
     }
 
     fun credentialKey(ssid: String, bssid: String?): String = storageKey(ssid, bssid)
+
+    fun looksLikeMacAddress(value: String?): Boolean {
+        val v = value?.trim().orEmpty()
+        if (v.isBlank()) return false
+        return MAC_ADDRESS_PATTERN.matches(v)
+    }
+
+    /** Loại BSSID, chuỗi capabilities scan, và giá trị rỗng — tránh hiển thị nhầm là mật khẩu. */
+    fun isPlausibleWifiPassword(value: String?, bssid: String? = null): Boolean {
+        val v = value?.trim().orEmpty()
+        if (v.isBlank()) return false
+        if (looksLikeMacAddress(v)) return false
+        if (v.contains('[') && v.contains(']')) return false
+        val nb = normalizeBssid(bssid)
+        if (nb.isNotEmpty() && normalizeBssid(v) == nb) return false
+        return true
+    }
 }

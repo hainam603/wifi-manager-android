@@ -3,6 +3,7 @@ package com.antigravity.wifimanager.ui.scanner
 import androidx.compose.runtime.Immutable
 import com.antigravity.wifimanager.data.WifiApInfo
 import com.antigravity.wifimanager.data.WifiConnectionState
+import com.antigravity.wifimanager.data.WifiCredentialKeys
 import java.util.Locale
 
 @Immutable
@@ -40,7 +41,8 @@ object ScannerUiMapper {
     /** Dùng dữ liệu đã enrich khi quét — không gọi repository từng dòng (tránh list trống/lag). */
     fun build(
         networks: List<WifiApInfo>,
-        connection: WifiConnectionState
+        connection: WifiConnectionState,
+        resolvePassword: (ssid: String, bssid: String?) -> String? = { _, _ -> null }
     ): ScannerDisplayState {
         val connectedSsid = resolveConnectedSsid(connection)
         val connectedAp = resolveConnectedAp(networks, connection, connectedSsid)
@@ -50,7 +52,12 @@ object ScannerUiMapper {
                 ap.securityType.contains("SAE", ignoreCase = true) ||
                 ap.securityType.contains("PSK", ignoreCase = true)
             val hasSystemCredential = ap.hasStoredPassword || ap.isReadyToConnect
-            val passwordDisplay = buildPasswordDisplay(ap, isNearbyGroup, hasSystemCredential)
+            val passwordDisplay = buildPasswordDisplay(
+                ap = ap,
+                isNearbyGroup = isNearbyGroup,
+                hasSystemCredential = hasSystemCredential,
+                resolvedPassword = resolvePassword(ap.ssid, ap.bssid)
+            )
             return ScannerApRowModel(
                 ap = ap,
                 passwordDisplay = passwordDisplay,
@@ -127,20 +134,28 @@ object ScannerUiMapper {
     private fun buildPasswordDisplay(
         ap: WifiApInfo,
         isNearbyGroup: Boolean,
-        hasSystemCredential: Boolean
+        hasSystemCredential: Boolean,
+        resolvedPassword: String?
     ): String? {
         val apiPass = ap.sharedPasswordFromApi
         val provider = ap.sharedProviderName
 
         if (ap.isSharedPasswordRejected) {
             return when {
-                !apiPass.isNullOrBlank() && !provider.isNullOrBlank() -> "$apiPass (API: $provider)"
-                !apiPass.isNullOrBlank() -> apiPass
+                WifiCredentialKeys.isPlausibleWifiPassword(resolvedPassword, ap.bssid) ->
+                    resolvedPassword!!.trim()
+                WifiCredentialKeys.isPlausibleWifiPassword(apiPass, ap.bssid) && !provider.isNullOrBlank() ->
+                    "${apiPass!!.trim()} (API: $provider)"
+                WifiCredentialKeys.isPlausibleWifiPassword(apiPass, ap.bssid) -> apiPass!!.trim()
                 else -> null
             }
         }
 
-        if (!apiPass.isNullOrBlank()) {
+        if (WifiCredentialKeys.isPlausibleWifiPassword(resolvedPassword, ap.bssid)) {
+            return resolvedPassword!!.trim()
+        }
+
+        if (!apiPass.isNullOrBlank() && WifiCredentialKeys.isPlausibleWifiPassword(apiPass, ap.bssid)) {
             return if (!provider.isNullOrBlank()) {
                 "$apiPass (chia sẻ: $provider)"
             } else {
@@ -148,10 +163,6 @@ object ScannerUiMapper {
             }
         }
 
-        return when {
-            hasSystemCredential && (isNearbyGroup && ap.isReadyToConnect || !isNearbyGroup) ->
-                "(đã lưu trên máy — mật khẩu ẩn)"
-            else -> null
-        }
+        return null
     }
 }
