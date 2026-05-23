@@ -9,5 +9,7 @@ data class SharedWifiCredential(
     val distanceMeters: Int? = null,
     val latitude: Double? = null,
     val longitude: Double? = null,
-    val cachedAtMs: Long = 0L
+    val cachedAtMs: Long = 0L,
+    /** ID bản ghi WifiMaster (tra nhanh bằng getWifiById). */
+    val wifiMasterId: Long? = null
 )

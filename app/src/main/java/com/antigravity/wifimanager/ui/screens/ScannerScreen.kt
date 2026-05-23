@@ -25,102 +25,56 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import com.antigravity.wifimanager.data.WifiApInfo
-import com.antigravity.wifimanager.data.WifiConnectionState
+import com.antigravity.wifimanager.data.WifiCredentialKeys
+import com.antigravity.wifimanager.data.WifiCredentialRefreshResult
 import com.antigravity.wifimanager.ui.components.GlassCard
 import com.antigravity.wifimanager.ui.components.WifiBandBadge
+import com.antigravity.wifimanager.ui.scanner.ScannerApRowModel
+import com.antigravity.wifimanager.ui.scanner.ScannerDisplayState
 import com.antigravity.wifimanager.ui.theme.*
 import kotlinx.coroutines.launch
-import java.util.Locale
-
-private fun wifiApKey(ssid: String, bssid: String): String =
-    "${ssid.lowercase(Locale.getDefault())}|${bssid.lowercase(Locale.getDefault())}"
 
 @Composable
 fun ScannerScreen(
-    scannedNetworks: List<WifiApInfo>,
+    displayState: ScannerDisplayState,
+    networkCount: Int,
     scanStatusText: String,
     isScanning: Boolean = false,
     connectingApKey: String? = null,
     connectFailedApKeys: Set<String> = emptySet(),
     rootConnectAvailable: Boolean = true,
     isPasswordBusy: Boolean = false,
-    actionsBlocked: Boolean = false,
-    currentConnectionState: WifiConnectionState,
+    refreshingPasswordApKey: String? = null,
+    connectedSignalPercent: Int = 0,
     onRefreshScan: () -> Unit,
     onConnectNetwork: (ssid: String, bssid: String) -> Unit,
     onHasSystemCredential: (String) -> Boolean,
-    onGetSavedPassword: (String) -> String?,
-    onSavePassword: (String, String) -> Unit,
-    onRemovePassword: (String) -> Unit,
-    onGetSimilarSsidPassword: (String) -> Pair<String, String>?,
-    onResolvePassword: (String, String?) -> String?
+    onGetSavedPassword: (String, String?) -> String?,
+    onSavePassword: (String, String, String?) -> Unit,
+    onRemovePassword: (String, String?) -> Unit,
+    onResolvePassword: (String, String?) -> String?,
+    onRefreshPasswordForBssid: suspend (String, String) -> WifiCredentialRefreshResult
 ) {
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     var passwordDialogSsid by remember { mutableStateOf<String?>(null) }
     var passwordDialogBssid by remember { mutableStateOf<String?>(null) }
+    var passwordDialogSimilarSsid by remember { mutableStateOf<String?>(null) }
     var passwordInput by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
-
-    // 1. Phân chia các mạng thành 3 nhóm: Đang kết nối, Đã lưu, Lân cận
-    val connectedSsid = if (currentConnectionState.isConnected && currentConnectionState.ssid.isNotEmpty() &&
-        currentConnectionState.ssid != "Mạng WiFi" && currentConnectionState.ssid != "Đang kết nối WiFi" &&
-        currentConnectionState.ssid != "<unknown ssid>") {
-        currentConnectionState.ssid
-    } else {
-        null
-    }
-
-    val connectedAp = if (connectedSsid != null) {
-        val sameSsidAps = scannedNetworks.filter { it.ssid == connectedSsid }
-        when {
-            sameSsidAps.isNotEmpty() -> {
-                when {
-                    currentConnectionState.frequencyMhz >= 4900 ->
-                        sameSsidAps.filter { it.is5GHz }.maxByOrNull { it.signalPercent }
-                            ?: sameSsidAps.maxByOrNull { it.signalPercent }
-                    currentConnectionState.frequencyMhz in 2400..2500 ->
-                        sameSsidAps.filter { !it.is5GHz }.maxByOrNull { it.signalPercent }
-                            ?: sameSsidAps.maxByOrNull { it.signalPercent }
-                    else -> sameSsidAps.maxByOrNull { it.signalPercent }
-                }
-            }
-            else -> WifiApInfo(
-                ssid = connectedSsid,
-                bssid = currentConnectionState.bssid.ifEmpty { "00:00:00:00:00:00" },
-                signalPercent = currentConnectionState.signalPercent,
-                frequencyMhz = currentConnectionState.frequencyMhz.coerceAtLeast(2412),
-                isSaved = true,
-                hasStoredPassword = true,
-                securityType = currentConnectionState.authType
-            )
-        }
-    } else {
-        null
-    }
-
-    val wifiApComparator = compareByDescending<WifiApInfo> { it.signalPercent }
-        .thenByDescending { it.is5GHz }
-        .thenByDescending { it.frequencyMhz }
-        .thenBy { it.ssid.lowercase(Locale.getDefault()) }
-
-    // Mạng đã lưu
-    val sortedSaved = scannedNetworks.filter {
-        it.ssid != connectedSsid && it.hasStoredPassword
-    }.sortedWith(wifiApComparator)
-
-    // Mạng lân cận
-    val sortedNearby = scannedNetworks.filter {
-        it.ssid != connectedSsid && !it.hasStoredPassword
-    }.sortedWith(wifiApComparator)
-
+    val connectedRow = displayState.connectedRow
+    val savedRows = displayState.savedRows
+    val nearbyRows = displayState.nearbyRows
+    val hasDisplayRows = connectedRow != null || savedRows.isNotEmpty() || nearbyRows.isNotEmpty()
+    val showEmptyPlaceholder = networkCount == 0 && !isScanning
+    val showList = networkCount > 0 && (hasDisplayRows || isScanning)
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             FloatingActionButton(
                 onClick = {
-                    if (isScanning || connectingApKey != null || actionsBlocked) return@FloatingActionButton
+                    if (isScanning || connectingApKey != null) return@FloatingActionButton
                     onRefreshScan()
                 },
                 containerColor = MaterialTheme.colorScheme.primary,
@@ -151,7 +105,7 @@ fun ScannerScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Tìm thấy ${scannedNetworks.size} mạng WiFi xung quanh bạn",
+                text = "Tìm thấy $networkCount mạng WiFi xung quanh bạn",
                 fontSize = 13.sp,
                 color = TextSecondary
             )
@@ -179,7 +133,7 @@ fun ScannerScreen(
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
-            if (scannedNetworks.isEmpty()) {
+            if (showEmptyPlaceholder) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -190,30 +144,20 @@ fun ScannerScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        if (isScanning) {
-                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                            Text(
-                                text = "Đang tìm kiếm tín hiệu WiFi...",
-                                color = TextSecondary,
-                                fontSize = 14.sp
-                            )
-                        } else {
-                            Text(
-                                text = "Chưa có mạng — bấm nút quét để tải danh sách",
-                                color = TextSecondary,
-                                fontSize = 14.sp
-                            )
-                        }
+                        Text(
+                            text = "Chưa có mạng — bấm nút quét để tải danh sách",
+                            color = TextSecondary,
+                            fontSize = 14.sp
+                        )
                     }
                 }
-            } else {
+            } else if (showList) {
                 LazyColumn(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // 1. Nhóm Đang kết nối
-                    if (connectedAp != null) {
-                        item {
+                    if (connectedRow != null) {
+                        item(key = "header_connected") {
                             Text(
                                 text = "Đang kết nối",
                                 fontSize = 13.sp,
@@ -221,37 +165,34 @@ fun ScannerScreen(
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(bottom = 6.dp, top = 4.dp)
                             )
-
-
-                            val connectedPassword = onResolvePassword(connectedAp.ssid, connectedAp.bssid)
-
-                            WifiApRow(
-                                ap = connectedAp,
+                        }
+                        item(key = "connected_${connectedRow.stableKey}") {
+                            ScannerApListItem(
+                                row = connectedRow,
+                                signalPercentOverride = connectedSignalPercent,
                                 isConnectedState = true,
-                                isConnecting = connectingApKey == wifiApKey(connectedAp.ssid, connectedAp.bssid),
-                                connectFailed = connectFailedApKeys.contains(
-                                    wifiApKey(connectedAp.ssid, connectedAp.bssid)
-                                ),
-                                connectEnabled = rootConnectAvailable,
-                                connectBlocked = connectingApKey != null,
-                                passwordDisplay = connectedPassword,
-                                onConnectClick = {
-                                    onConnectNetwork(connectedAp.ssid, connectedAp.bssid)
-                                },
-                                onEditPasswordClick = {
-                                    passwordDialogSsid = connectedAp.ssid
-                                    passwordDialogBssid = connectedAp.bssid
-                                    passwordInput = onGetSavedPassword(connectedAp.ssid)
-                                        ?: onGetSimilarSsidPassword(connectedAp.ssid)?.second.orEmpty()
+                                connectingApKey = connectingApKey,
+                                connectFailedApKeys = connectFailedApKeys,
+                                refreshingPasswordApKey = refreshingPasswordApKey,
+                                rootConnectAvailable = rootConnectAvailable,
+                                onConnectNetwork = onConnectNetwork,
+                                onResolvePassword = onResolvePassword,
+                                onRefreshPasswordForBssid = onRefreshPasswordForBssid,
+                                coroutineScope = coroutineScope,
+                                snackbarHostState = snackbarHostState,
+                                onOpenPasswordDialog = { ssid, bssid, initial, similarSsid ->
+                                    passwordDialogSsid = ssid
+                                    passwordDialogBssid = bssid
+                                    passwordDialogSimilarSsid = similarSsid
+                                    passwordInput = initial
                                     passwordVisible = true
                                 }
                             )
                         }
                     }
 
-                    // 2. Nhóm Mạng Wi-Fi đã lưu
-                    if (sortedSaved.isNotEmpty()) {
-                        item {
+                    if (savedRows.isNotEmpty()) {
+                        item(key = "header_saved") {
                             Text(
                                 text = "Mạng Wi-Fi đã lưu",
                                 fontSize = 13.sp,
@@ -260,88 +201,36 @@ fun ScannerScreen(
                                 modifier = Modifier.padding(bottom = 6.dp, top = 12.dp)
                             )
                         }
-                        
-                        items(sortedSaved) { ap ->
-                            val savedPassword = onGetSavedPassword(ap.ssid)
-                            val similarPassword = onGetSimilarSsidPassword(ap.ssid)
-                            val hasSystemCredential = onHasSystemCredential(ap.ssid)
-                            val needsPassword = ap.securityType.contains("WPA", ignoreCase = true) ||
-                                                ap.securityType.contains("SAE", ignoreCase = true) ||
-                                                ap.securityType.contains("PSK", ignoreCase = true)
-                            val resolvedPassword = onResolvePassword(ap.ssid, ap.bssid)
-                                ?: ap.sharedPasswordFromApi?.takeIf { ap.isSharedPasswordRejected }
-                            val passwordDisplay = when {
-                                ap.isSharedPasswordRejected -> {
-                                    val provider = ap.sharedProviderName
-                                    val apiPass = ap.sharedPasswordFromApi
-                                    when {
-                                        !apiPass.isNullOrBlank() && !provider.isNullOrBlank() ->
-                                            "$apiPass (API: $provider)"
-                                        !apiPass.isNullOrBlank() -> apiPass
-                                        else -> null
-                                    }
-                                }
-                                !resolvedPassword.isNullOrEmpty() -> {
-                                    val provider = ap.sharedProviderName
-                                    if (!provider.isNullOrBlank() && !savedPassword.isNullOrEmpty()) {
-                                        "$resolvedPassword (API: $provider)"
-                                    } else if (!provider.isNullOrBlank()) {
-                                        "$resolvedPassword (chia sẻ: $provider)"
-                                    } else if (!similarPassword?.second.isNullOrEmpty()) {
-                                        "$resolvedPassword (từ ${similarPassword!!.first})"
-                                    } else {
-                                        resolvedPassword
-                                    }
-                                }
-                                hasSystemCredential -> "(đã lưu trên máy — mật khẩu ẩn)"
-                                else -> null
-                            }
-
-                            WifiApRow(
-                                ap = ap,
+                        items(
+                            items = savedRows,
+                            key = { it.stableKey },
+                            contentType = { "saved" }
+                        ) { row ->
+                            ScannerApListItem(
+                                row = row,
                                 isConnectedState = false,
-                                isConnecting = connectingApKey == wifiApKey(ap.ssid, ap.bssid),
-                                connectFailed = connectFailedApKeys.contains(wifiApKey(ap.ssid, ap.bssid)),
-                                connectEnabled = rootConnectAvailable,
-                                connectBlocked = connectingApKey != null,
-                                passwordDisplay = passwordDisplay,
-                                onConnectClick = {
-                                    if (connectingApKey != null) return@WifiApRow
-                                    if (!rootConnectAvailable) return@WifiApRow
-                                    if (ap.isSharedPasswordRejected) {
-                                        passwordDialogSsid = ap.ssid
-                                        passwordDialogBssid = ap.bssid
-                                        passwordInput = onResolvePassword(ap.ssid, ap.bssid)
-                                            ?: ap.sharedPasswordFromApi
-                                            ?: similarPassword?.second
-                                            ?: ""
-                                        passwordVisible = passwordInput.isNotEmpty()
-                                        return@WifiApRow
-                                    }
-                                    val hasAnySaved = ap.isReadyToConnect || !savedPassword.isNullOrEmpty() || hasSystemCredential || ap.hasStoredPassword
-                                    if (needsPassword && !hasAnySaved) {
-                                        passwordDialogSsid = ap.ssid
-                                        passwordDialogBssid = ap.bssid
-                                        val similar = onGetSimilarSsidPassword(ap.ssid)
-                                        passwordInput = onResolvePassword(ap.ssid, ap.bssid) ?: similar?.second ?: ""
-                                        passwordVisible = passwordInput.isEmpty()
-                                    } else {
-                                        onConnectNetwork(ap.ssid, ap.bssid)
-                                    }
-                                },
-                                onEditPasswordClick = {
-                                    passwordDialogSsid = ap.ssid
-                                    passwordDialogBssid = ap.bssid
-                                    passwordInput = onResolvePassword(ap.ssid, ap.bssid) ?: savedPassword ?: similarPassword?.second ?: ""
+                                connectingApKey = connectingApKey,
+                                connectFailedApKeys = connectFailedApKeys,
+                                refreshingPasswordApKey = refreshingPasswordApKey,
+                                rootConnectAvailable = rootConnectAvailable,
+                                onConnectNetwork = onConnectNetwork,
+                                onResolvePassword = onResolvePassword,
+                                onRefreshPasswordForBssid = onRefreshPasswordForBssid,
+                                coroutineScope = coroutineScope,
+                                snackbarHostState = snackbarHostState,
+                                onOpenPasswordDialog = { ssid, bssid, initial, similarSsid ->
+                                    passwordDialogSsid = ssid
+                                    passwordDialogBssid = bssid
+                                    passwordDialogSimilarSsid = similarSsid
+                                    passwordInput = initial
                                     passwordVisible = true
                                 }
                             )
                         }
                     }
 
-                    // 3. Nhóm Mạng Wi-Fi lân cận
-                    if (sortedNearby.isNotEmpty()) {
-                        item {
+                    if (nearbyRows.isNotEmpty()) {
+                        item(key = "header_nearby") {
                             Text(
                                 text = "Chọn mạng Wi-Fi lân cận",
                                 fontSize = 13.sp,
@@ -350,77 +239,28 @@ fun ScannerScreen(
                                 modifier = Modifier.padding(bottom = 6.dp, top = 12.dp)
                             )
                         }
-
-                        items(sortedNearby) { ap ->
-                            val savedPassword = onGetSavedPassword(ap.ssid)
-                            val similarPassword = onGetSimilarSsidPassword(ap.ssid)
-                            val hasSystemCredential = onHasSystemCredential(ap.ssid)
-                            val needsPassword = ap.securityType.contains("WPA", ignoreCase = true) ||
-                                                ap.securityType.contains("SAE", ignoreCase = true) ||
-                                                ap.securityType.contains("PSK", ignoreCase = true)
-                            val resolvedPassword = onResolvePassword(ap.ssid, ap.bssid)
-                                ?: ap.sharedPasswordFromApi?.takeIf { ap.isSharedPasswordRejected }
-                            val passwordDisplay = when {
-                                ap.isSharedPasswordRejected -> {
-                                    val provider = ap.sharedProviderName
-                                    val apiPass = ap.sharedPasswordFromApi
-                                    when {
-                                        !apiPass.isNullOrBlank() && !provider.isNullOrBlank() ->
-                                            "$apiPass (API: $provider)"
-                                        !apiPass.isNullOrBlank() -> apiPass
-                                        else -> null
-                                    }
-                                }
-                                !resolvedPassword.isNullOrEmpty() -> {
-                                    val provider = ap.sharedProviderName
-                                    when {
-                                        !provider.isNullOrBlank() -> "$resolvedPassword (chia sẻ: $provider)"
-                                        !similarPassword?.second.isNullOrEmpty() ->
-                                            "$resolvedPassword (từ ${similarPassword!!.first})"
-                                        else -> resolvedPassword
-                                    }
-                                }
-                                ap.isReadyToConnect && hasSystemCredential ->
-                                    "(đã lưu trên máy — mật khẩu ẩn)"
-                                else -> null
-                            }
-
-                            WifiApRow(
-                                ap = ap,
+                        items(
+                            items = nearbyRows,
+                            key = { it.stableKey },
+                            contentType = { "nearby" }
+                        ) { row ->
+                            ScannerApListItem(
+                                row = row,
                                 isConnectedState = false,
-                                isConnecting = connectingApKey == wifiApKey(ap.ssid, ap.bssid),
-                                connectFailed = connectFailedApKeys.contains(wifiApKey(ap.ssid, ap.bssid)),
-                                connectEnabled = rootConnectAvailable,
-                                connectBlocked = connectingApKey != null,
-                                passwordDisplay = passwordDisplay,
-                                onConnectClick = {
-                                    if (connectingApKey != null) return@WifiApRow
-                                    if (!rootConnectAvailable) return@WifiApRow
-                                    if (ap.isSharedPasswordRejected) {
-                                        passwordDialogSsid = ap.ssid
-                                        passwordDialogBssid = ap.bssid
-                                        passwordInput = onResolvePassword(ap.ssid, ap.bssid)
-                                            ?: ap.sharedPasswordFromApi
-                                            ?: similarPassword?.second
-                                            ?: ""
-                                        passwordVisible = passwordInput.isNotEmpty()
-                                        return@WifiApRow
-                                    }
-                                    val hasAnySaved = ap.isReadyToConnect || !savedPassword.isNullOrEmpty() || hasSystemCredential
-                                    if (needsPassword && !hasAnySaved) {
-                                        passwordDialogSsid = ap.ssid
-                                        passwordDialogBssid = ap.bssid
-                                        val similar = onGetSimilarSsidPassword(ap.ssid)
-                                        passwordInput = onResolvePassword(ap.ssid, ap.bssid) ?: similar?.second ?: ""
-                                        passwordVisible = passwordInput.isEmpty()
-                                    } else {
-                                        onConnectNetwork(ap.ssid, ap.bssid)
-                                    }
-                                },
-                                onEditPasswordClick = {
-                                    passwordDialogSsid = ap.ssid
-                                    passwordDialogBssid = ap.bssid
-                                    passwordInput = onResolvePassword(ap.ssid, ap.bssid) ?: savedPassword ?: similarPassword?.second ?: ""
+                                connectingApKey = connectingApKey,
+                                connectFailedApKeys = connectFailedApKeys,
+                                refreshingPasswordApKey = refreshingPasswordApKey,
+                                rootConnectAvailable = rootConnectAvailable,
+                                onConnectNetwork = onConnectNetwork,
+                                onResolvePassword = onResolvePassword,
+                                onRefreshPasswordForBssid = onRefreshPasswordForBssid,
+                                coroutineScope = coroutineScope,
+                                snackbarHostState = snackbarHostState,
+                                onOpenPasswordDialog = { ssid, bssid, initial, similarSsid ->
+                                    passwordDialogSsid = ssid
+                                    passwordDialogBssid = bssid
+                                    passwordDialogSimilarSsid = similarSsid
+                                    passwordInput = initial
                                     passwordVisible = true
                                 }
                             )
@@ -432,7 +272,8 @@ fun ScannerScreen(
 
         if (passwordDialogSsid != null) {
             val activeSsid = passwordDialogSsid!!
-            val savedPassword = onGetSavedPassword(activeSsid)
+            val activeBssid = passwordDialogBssid
+            val savedPassword = onGetSavedPassword(activeSsid, activeBssid)
             val hasSystemCredential = onHasSystemCredential(activeSsid)
 
             AlertDialog(
@@ -470,10 +311,10 @@ fun ScannerScreen(
                                 }
                             }
                         )
-                        val similar = onGetSimilarSsidPassword(activeSsid)
-                        if (savedPassword.isNullOrEmpty() && similar != null) {
+                        val similarSsid = passwordDialogSimilarSsid
+                        if (savedPassword.isNullOrEmpty() && !similarSsid.isNullOrBlank()) {
                             Text(
-                                text = "✨ Phát hiện mật khẩu từ mạng tương tự: '${similar.first}'",
+                                text = "✨ Phát hiện mật khẩu từ mạng tương tự: '$similarSsid'",
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.SemiBold
@@ -496,9 +337,9 @@ fun ScannerScreen(
                 },
                 confirmButton = {
                     TextButton(
-                        enabled = connectingApKey == null && !isPasswordBusy && !actionsBlocked,
+                        enabled = connectingApKey == null && !isPasswordBusy,
                         onClick = {
-                            onSavePassword(activeSsid, passwordInput)
+                            onSavePassword(activeSsid, passwordInput, activeBssid)
                             if (rootConnectAvailable) {
                                 onConnectNetwork(
                                     activeSsid,
@@ -532,7 +373,7 @@ fun ScannerScreen(
                         if (!savedPassword.isNullOrEmpty()) {
                             TextButton(
                                 onClick = {
-                                    onRemovePassword(activeSsid)
+                                    onRemovePassword(activeSsid, activeBssid)
                                     passwordDialogSsid = null
                                     coroutineScope.launch {
                                         snackbarHostState.showSnackbar("Đã xóa mật khẩu của '${activeSsid}'")
@@ -553,6 +394,92 @@ fun ScannerScreen(
 }
 
 @Composable
+private fun ScannerApListItem(
+    row: ScannerApRowModel,
+    signalPercentOverride: Int? = null,
+    isConnectedState: Boolean,
+    connectingApKey: String?,
+    connectFailedApKeys: Set<String>,
+    refreshingPasswordApKey: String?,
+    rootConnectAvailable: Boolean,
+    onConnectNetwork: (String, String) -> Unit,
+    onResolvePassword: (String, String?) -> String?,
+    onRefreshPasswordForBssid: suspend (String, String) -> WifiCredentialRefreshResult,
+    coroutineScope: kotlinx.coroutines.CoroutineScope,
+    snackbarHostState: SnackbarHostState,
+    onOpenPasswordDialog: (ssid: String, bssid: String, initial: String, similarSsid: String?) -> Unit
+) {
+    val ap = if (signalPercentOverride != null) {
+        row.ap.copy(signalPercent = signalPercentOverride)
+    } else {
+        row.ap
+    }
+    val apKey = row.stableKey
+    val canRefreshByBssid = WifiCredentialKeys.isValidBssid(ap.bssid) &&
+        (
+            ap.isSharedPasswordRejected ||
+                !ap.sharedPasswordFromApi.isNullOrBlank() ||
+                !ap.sharedProviderName.isNullOrBlank()
+            )
+
+    WifiApRow(
+        ap = ap,
+        isConnectedState = isConnectedState,
+        isConnecting = connectingApKey == apKey,
+        connectFailed = connectFailedApKeys.contains(apKey),
+        connectEnabled = rootConnectAvailable,
+        connectBlocked = connectingApKey != null || refreshingPasswordApKey != null,
+        passwordDisplay = row.passwordDisplay,
+        showRefreshPasswordButton = canRefreshByBssid && !isConnectedState,
+        isRefreshingPassword = refreshingPasswordApKey == apKey,
+        onRefreshPasswordClick = {
+            coroutineScope.launch {
+                val result = onRefreshPasswordForBssid(ap.ssid, ap.bssid)
+                snackbarHostState.showSnackbar(result.message)
+            }
+        },
+        onConnectClick = {
+            if (connectingApKey != null || !rootConnectAvailable) return@WifiApRow
+            if (ap.isSharedPasswordRejected) {
+                onOpenPasswordDialog(
+                    ap.ssid,
+                    ap.bssid,
+                    onResolvePassword(ap.ssid, ap.bssid)
+                        ?: ap.sharedPasswordFromApi
+                        ?: row.similarPassword.orEmpty(),
+                    row.similarSsid
+                )
+                return@WifiApRow
+            }
+            val hasAnySaved = ap.isReadyToConnect ||
+                !row.savedPassword.isNullOrEmpty() ||
+                row.hasSystemCredential ||
+                ap.hasStoredPassword
+            if (row.needsPassword && !hasAnySaved) {
+                onOpenPasswordDialog(
+                    ap.ssid,
+                    ap.bssid,
+                    onResolvePassword(ap.ssid, ap.bssid) ?: row.similarPassword.orEmpty(),
+                    row.similarSsid
+                )
+            } else {
+                onConnectNetwork(ap.ssid, ap.bssid)
+            }
+        },
+        onEditPasswordClick = {
+            onOpenPasswordDialog(
+                ap.ssid,
+                ap.bssid,
+                onResolvePassword(ap.ssid, ap.bssid)
+                    ?: row.savedPassword
+                    ?: row.similarPassword.orEmpty(),
+                row.similarSsid
+            )
+        }
+    )
+}
+
+@Composable
 private fun WifiApRow(
     ap: WifiApInfo,
     isConnectedState: Boolean,
@@ -561,6 +488,9 @@ private fun WifiApRow(
     connectEnabled: Boolean = true,
     connectBlocked: Boolean = false,
     passwordDisplay: String? = null,
+    showRefreshPasswordButton: Boolean = false,
+    isRefreshingPassword: Boolean = false,
+    onRefreshPasswordClick: () -> Unit = {},
     onConnectClick: () -> Unit,
     onEditPasswordClick: () -> Unit
 ) {
@@ -662,6 +592,35 @@ private fun WifiApRow(
                         fontWeight = FontWeight.Bold,
                         color = if (isConnectedState) Color(0xFFFECACA) else WifiWeak
                     )
+                    if (showRefreshPasswordButton) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        TextButton(
+                            onClick = onRefreshPasswordClick,
+                            enabled = !isRefreshingPassword && !connectBlocked,
+                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            if (isRefreshingPassword) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                            Text(
+                                text = if (isRefreshingPassword) "Đang cập nhật..." else "Cập nhật mật khẩu (BSSID)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 } else if (connectFailed && !ap.isSharedPasswordRejected) {
                     Text(
                         text = "Kết nối thất bại — thử lại hoặc sửa mật khẩu",
@@ -686,6 +645,26 @@ private fun WifiApRow(
                         color = if (isConnectedState) Color(0xFFE0F2FE) else Accent,
                         maxLines = 3
                     )
+                }
+
+                if (showRefreshPasswordButton && !ap.isSharedPasswordRejected) {
+                    TextButton(
+                        onClick = onRefreshPasswordClick,
+                        enabled = !isRefreshingPassword && !connectBlocked,
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                        modifier = Modifier.height(30.dp)
+                    ) {
+                        if (isRefreshingPassword) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Đang cập nhật...", fontSize = 11.sp)
+                        } else {
+                            Text("Cập nhật mật khẩu (BSSID)", fontSize = 11.sp)
+                        }
+                    }
                 }
             }
 

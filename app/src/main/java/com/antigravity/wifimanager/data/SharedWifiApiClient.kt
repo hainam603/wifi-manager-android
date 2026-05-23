@@ -50,6 +50,45 @@ class SharedWifiApiClient(
         }
     }
 
+    /** Chỉ dùng khi URL cấu hình có `{bssid}` hoặc `{mac}`. */
+    fun fetchByBssid(bssid: String): List<SharedWifiCredential> {
+        if (baseUrl.isBlank()) return emptyList()
+        val template = baseUrl.trim()
+        if (!template.contains("{bssid}", ignoreCase = true) &&
+            !template.contains("{mac}", ignoreCase = true)
+        ) {
+            return emptyList()
+        }
+
+        val normalized = bssid.trim().lowercase()
+        val endpoint = template
+            .replace("{bssid}", URLEncoder.encode(normalized, StandardCharsets.UTF_8.name()))
+            .replace("{mac}", URLEncoder.encode(normalized, StandardCharsets.UTF_8.name()))
+
+        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 12_000
+            readTimeout = 12_000
+            setRequestProperty("Accept", "application/json")
+            if (apiKey.isNotBlank()) {
+                setRequestProperty("Authorization", "Bearer $apiKey")
+                setRequestProperty("X-Api-Key", apiKey)
+            }
+        }
+
+        return try {
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            connection.disconnect()
+            if (code !in 200..299 || body.isBlank()) emptyList()
+            else SharedWifiJsonParser.parse(body, providerLabel, null, null)
+        } catch (_: Exception) {
+            connection.disconnect()
+            emptyList()
+        }
+    }
+
     private fun buildUrl(lat: Double, lng: Double, radiusMeters: Int): String {
         val template = baseUrl.trim()
         if (template.contains("{lat}") || template.contains("{lng}")) {

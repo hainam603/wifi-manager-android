@@ -27,7 +27,9 @@ data class WifiApInfo(
     /** Mật khẩu từ API (hiển thị; có thể đã bị đánh dấu không hợp lệ). */
     val sharedPasswordFromApi: String? = null,
     /** Mật khẩu từ API đã thử kết nối thất bại — chờ API cập nhật mật khẩu mới. */
-    val isSharedPasswordRejected: Boolean = false
+    val isSharedPasswordRejected: Boolean = false,
+    /** ID WifiMaster (nếu có) — dùng tra nhanh getWifiById. */
+    val wifiMasterId: Long? = null
 ) {
     val is5GHz: Boolean
         get() = frequencyMhz >= 4900

@@ -46,7 +46,7 @@ import com.antigravity.wifimanager.ui.screens.DashboardScreen
 import com.antigravity.wifimanager.ui.screens.HistoryScreen
 import com.antigravity.wifimanager.ui.screens.ScannerScreen
 import com.antigravity.wifimanager.ui.screens.SettingsScreen
-import com.antigravity.wifimanager.ui.components.LoadingOverlay
+import com.antigravity.wifimanager.ui.scanner.rememberScannerDisplayState
 import com.antigravity.wifimanager.ui.theme.Slate950
 import com.antigravity.wifimanager.ui.theme.WifiManagerTheme
 import kotlinx.coroutines.flow.collectLatest
@@ -201,28 +201,7 @@ class MainActivity : ComponentActivity() {
         var isClearingHistory by remember { mutableStateOf(false) }
         var isTogglingService by remember { mutableStateOf(false) }
         var isSavingPassword by remember { mutableStateOf(false) }
-
-        fun overlayMessage(): String? {
-            loadingMessage?.let { return it }
-            if (isScanning) return "Đang quét WiFi và tải dữ liệu cộng đồng..."
-            if (connectingApKey != null) return "Đang kết nối WiFi..."
-            if (sharedWifiPrefetching) {
-                val progress = sharedWifiPrefetchProgress
-                return if (progress != null) {
-                    "Đang tải dữ liệu offline (${progress.first}/${progress.second})..."
-                } else {
-                    "Đang tải dữ liệu offline..."
-                }
-            }
-            if (isRequestingRoot) return "Đang kiểm tra quyền Root..."
-            if (isClearingOffline) return "Đang xóa bộ nhớ offline..."
-            if (isClearingHistory) return "Đang xóa lịch sử..."
-            if (isTogglingService) return "Đang cập nhật giám sát nền..."
-            if (isSavingPassword) return "Đang lưu mật khẩu..."
-            return null
-        }
-
-        val uiBlocked = overlayMessage() != null
+        var refreshingPasswordApKey by remember { mutableStateOf<String?>(null) }
 
         fun updateScanStatusText() {
             val lastScanMs = repository.getLastScanAtMs()
@@ -313,29 +292,25 @@ class MainActivity : ComponentActivity() {
                 ) {
                     NavigationBarItem(
                         selected = currentTab == 0,
-                        enabled = !uiBlocked,
-                        onClick = { if (!uiBlocked) currentTab = 0 },
+                        onClick = { currentTab = 0 },
                         icon = { Icon(imageVector = Icons.Default.Dashboard, contentDescription = null) },
                         label = { Text("Trang chủ", fontSize = 11.sp) }
                     )
                     NavigationBarItem(
                         selected = currentTab == 1,
-                        enabled = !uiBlocked,
-                        onClick = { if (!uiBlocked) currentTab = 1 },
+                        onClick = { currentTab = 1 },
                         icon = { Icon(imageVector = Icons.Default.Radar, contentDescription = null) },
                         label = { Text("Quét WiFi", fontSize = 11.sp) }
                     )
                     NavigationBarItem(
                         selected = currentTab == 2,
-                        enabled = !uiBlocked,
-                        onClick = { if (!uiBlocked) currentTab = 2 },
+                        onClick = { currentTab = 2 },
                         icon = { Icon(imageVector = Icons.Default.History, contentDescription = null) },
                         label = { Text("Nhật ký", fontSize = 11.sp) }
                     )
                     NavigationBarItem(
                         selected = currentTab == 3,
-                        enabled = !uiBlocked,
-                        onClick = { if (!uiBlocked) currentTab = 3 },
+                        onClick = { currentTab = 3 },
                         icon = { Icon(imageVector = Icons.Default.Settings, contentDescription = null) },
                         label = { Text("Cấu hình", fontSize = 11.sp) }
                     )
@@ -354,9 +329,8 @@ class MainActivity : ComponentActivity() {
                         isServiceRunning = isServiceRunning,
                         isManualScanLoading = loadingMessage != null,
                         isTogglingService = isTogglingService,
-                        actionsEnabled = !uiBlocked,
                         onToggleService = {
-                            if (uiBlocked) return@DashboardScreen
+                            if (isTogglingService) return@DashboardScreen
                             coroutineScope.launch {
                                 isTogglingService = true
                                 try {
@@ -395,7 +369,7 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onManualScan = {
-                            if (uiBlocked) return@DashboardScreen
+                            if (loadingMessage != null) return@DashboardScreen
                             coroutineScope.launch {
                                 try {
                                     loadingMessage = "Đang quét WiFi và tải dữ liệu..."
@@ -440,16 +414,22 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     )
-                    1 -> ScannerScreen(
-                        scannedNetworks = scannedList,
+                    1 -> {
+                        val scannerDisplay = rememberScannerDisplayState(
+                            networks = scannedList,
+                            connection = connectionState
+                        )
+                        ScannerScreen(
+                        displayState = scannerDisplay,
+                        networkCount = scannedList.size,
                         scanStatusText = scanStatusText,
                         isScanning = isScanning,
                         connectingApKey = connectingApKey,
                         connectFailedApKeys = connectFailedApKeys,
                         rootConnectAvailable = rootStatus == RootStatus.GRANTED,
                         isPasswordBusy = isSavingPassword,
-                        actionsBlocked = uiBlocked,
-                        currentConnectionState = connectionState,
+                        refreshingPasswordApKey = refreshingPasswordApKey,
+                        connectedSignalPercent = connectionState.signalPercent,
                         onRefreshScan = {
                             refreshScannedNetworks(forceRefresh = true)
                         },
@@ -468,7 +448,7 @@ class MainActivity : ComponentActivity() {
                                 val result = try {
                                     val ap = scannedList.find { it.ssid == ssid && it.bssid == bssid }
                                         ?: scannedList.find { it.ssid == ssid }
-                                    val saved = repository.getSavedWifiPassword(ssid)
+                                    val saved = repository.getSavedWifiPassword(ssid, ap?.bssid ?: bssid)
                                     val preferApiPassword = ap != null &&
                                         !ap.isSharedPasswordRejected &&
                                         !ap.sharedPasswordFromApi.isNullOrBlank() &&
@@ -504,16 +484,16 @@ class MainActivity : ComponentActivity() {
                         onHasSystemCredential = { ssid ->
                             repository.hasStoredCredential(ssid)
                         },
-                        onGetSavedPassword = { ssid ->
-                            repository.getSavedWifiPassword(ssid)
+                        onGetSavedPassword = { ssid, bssid ->
+                            repository.getSavedWifiPassword(ssid, bssid)
                         },
-                        onSavePassword = { ssid, password ->
-                            if (uiBlocked) return@ScannerScreen
+                        onSavePassword = { ssid, password, bssid ->
+                            if (isSavingPassword) return@ScannerScreen
                             coroutineScope.launch {
                                 isSavingPassword = true
                                 try {
                                     withContext(Dispatchers.IO) {
-                                        repository.saveWifiPassword(ssid, password)
+                                        repository.saveWifiPassword(ssid, password, bssid)
                                         repository.suggestNetworks(repository.getAllowedSsids().toList())
                                     }
                                     refreshScannedNetworksAndWait(forceRefresh = true)
@@ -522,13 +502,13 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         },
-                        onRemovePassword = { ssid ->
-                            if (uiBlocked) return@ScannerScreen
+                        onRemovePassword = { ssid, bssid ->
+                            if (isSavingPassword) return@ScannerScreen
                             coroutineScope.launch {
                                 isSavingPassword = true
                                 try {
                                     withContext(Dispatchers.IO) {
-                                        repository.forgetNetwork(ssid)
+                                        repository.forgetNetwork(ssid, bssid)
                                     }
                                     refreshScannedNetworksAndWait(forceRefresh = true)
                                 } finally {
@@ -536,18 +516,29 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         },
-                        onGetSimilarSsidPassword = { ssid ->
-                            repository.getSimilarSsidWithSavedPassword(ssid)
-                        },
                         onResolvePassword = { ssid, bssid ->
                             repository.resolveConnectionPassword(ssid, bssid = bssid)
+                        },
+                        onRefreshPasswordForBssid = { ssid, bssid ->
+                            val key = "${ssid.lowercase()}|${bssid.lowercase()}"
+                            refreshingPasswordApKey = key
+                            try {
+                                val result = withContext(Dispatchers.IO) {
+                                    repository.refreshSharedPasswordForBssid(ssid, bssid)
+                                }
+                                refreshScannedNetworksAndWait(forceRefresh = false)
+                                result
+                            } finally {
+                                refreshingPasswordApKey = null
+                            }
                         }
-                    )
+                        )
+                    }
                     2 -> HistoryScreen(
                         historyLogs = historyLogs,
                         isClearingHistory = isClearingHistory,
                         onClearHistory = {
-                            if (uiBlocked) return@HistoryScreen
+                            if (isClearingHistory) return@HistoryScreen
                             coroutineScope.launch {
                                 isClearingHistory = true
                                 try {
@@ -621,7 +612,7 @@ class MainActivity : ComponentActivity() {
                             sharedWifiOfflineMaxNetworks = repository.getSharedWifiOfflineMaxNetworks()
                         },
                         onClearSharedWifiOffline = {
-                            if (uiBlocked) return@SettingsScreen
+                            if (isClearingOffline) return@SettingsScreen
                             coroutineScope.launch {
                                 isClearingOffline = true
                                 try {
@@ -642,7 +633,7 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onPrefetchSharedWifiArea = {
-                            if (sharedWifiPrefetching || uiBlocked) return@SettingsScreen
+                            if (sharedWifiPrefetching) return@SettingsScreen
                             coroutineScope.launch {
                                 sharedWifiPrefetching = true
                                 sharedWifiPrefetchProgress = 0 to 9
@@ -680,7 +671,7 @@ class MainActivity : ComponentActivity() {
                             sharedWifiApiKey = key
                         },
                         onRequestRoot = {
-                            if (uiBlocked) return@SettingsScreen
+                            if (isRequestingRoot) return@SettingsScreen
                             coroutineScope.launch {
                                 isRequestingRoot = true
                                 try {
@@ -707,10 +698,6 @@ class MainActivity : ComponentActivity() {
                             batteryOptimized = !isIgnoringBatteryOptimizations()
                         }
                     )
-                }
-
-                overlayMessage()?.let { message ->
-                    LoadingOverlay(message = message)
                 }
             }
         }

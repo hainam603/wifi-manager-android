@@ -75,6 +75,8 @@ object SharedWifiJsonParser {
             else -> null
         }
 
+        val wifiMasterId = item.optLong("id", 0L).takeIf { it > 0L }
+
         return SharedWifiCredential(
             ssid = ssid,
             password = password,
@@ -87,7 +89,8 @@ object SharedWifiJsonParser {
             distanceMeters = distance,
             latitude = apLat ?: userLat,
             longitude = apLng ?: userLng,
-            cachedAtMs = System.currentTimeMillis()
+            cachedAtMs = System.currentTimeMillis(),
+            wifiMasterId = wifiMasterId
         )
     }
 

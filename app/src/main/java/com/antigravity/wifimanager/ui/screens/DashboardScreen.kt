@@ -29,7 +29,6 @@ fun DashboardScreen(
     isServiceRunning: Boolean,
     isManualScanLoading: Boolean = false,
     isTogglingService: Boolean = false,
-    actionsEnabled: Boolean = true,
     onToggleService: () -> Unit,
     onManualScan: () -> Unit
 ) {
@@ -62,7 +61,7 @@ fun DashboardScreen(
             }
             
             // Icon trạng thái hoạt động dịch vụ nền
-            IconButton(onClick = onToggleService, enabled = actionsEnabled && !isTogglingService) {
+            IconButton(onClick = onToggleService, enabled = !isTogglingService) {
                 if (isTogglingService) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(22.dp),
@@ -201,7 +200,7 @@ fun DashboardScreen(
         ) {
             OutlinedButton(
                 onClick = onManualScan,
-                enabled = actionsEnabled && !isManualScanLoading && !isTogglingService,
+                enabled = !isManualScanLoading && !isTogglingService,
                 modifier = Modifier
                     .weight(1f)
                     .height(50.dp),
@@ -223,7 +222,7 @@ fun DashboardScreen(
 
             Button(
                 onClick = onToggleService,
-                enabled = actionsEnabled && !isManualScanLoading && !isTogglingService,
+                enabled = !isManualScanLoading && !isTogglingService,
                 modifier = Modifier
                     .weight(1f)
                     .height(50.dp),

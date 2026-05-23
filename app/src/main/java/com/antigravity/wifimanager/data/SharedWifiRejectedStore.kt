@@ -36,22 +36,42 @@ class SharedWifiRejectedStore(context: Context) {
 
     fun isRejected(ssid: String, bssid: String?, password: String): Boolean {
         if (ssid.isBlank() || password.isBlank()) return false
+        val apBssid = WifiCredentialKeys.normalizeBssid(bssid)
 
         synchronized(lock) {
             return loadAll().any { entry ->
-                entry.ssid.equals(ssid, ignoreCase = true) && entry.password == password
+                if (!entry.ssid.equals(ssid, ignoreCase = true) || entry.password != password) {
+                    return@any false
+                }
+                val entryBssid = WifiCredentialKeys.normalizeBssid(entry.bssid)
+                when {
+                    apBssid.isNotEmpty() && entryBssid.isNotEmpty() -> entryBssid == apBssid
+                    apBssid.isNotEmpty() && entryBssid.isEmpty() -> false
+                    else -> true
+                }
             }
         }
     }
 
-    fun findRejectedForSsid(ssid: String): RejectedEntry? {
+    fun findRejected(ssid: String, bssid: String? = null): RejectedEntry? {
         if (ssid.isBlank()) return null
+        val apBssid = WifiCredentialKeys.normalizeBssid(bssid)
+
         synchronized(lock) {
-            return loadAll()
-                .filter { it.ssid.equals(ssid, ignoreCase = true) }
+            val forSsid = loadAll().filter { it.ssid.equals(ssid, ignoreCase = true) }
+            if (apBssid.isNotEmpty()) {
+                forSsid.firstOrNull {
+                    WifiCredentialKeys.normalizeBssid(it.bssid) == apBssid
+                }?.let { return it }
+            }
+            return forSsid
+                .filter { WifiCredentialKeys.normalizeBssid(it.bssid).isEmpty() }
                 .maxByOrNull { it.rejectedAtMs }
+                ?: forSsid.maxByOrNull { it.rejectedAtMs }
         }
     }
+
+    fun findRejectedForSsid(ssid: String): RejectedEntry? = findRejected(ssid, null)
 
     /** Gỡ cờ khi API trả mật khẩu khác với bản đã bị từ chối (cùng SSID). */
     fun clearIfPasswordUpdated(credentials: List<SharedWifiCredential>) {
@@ -62,9 +82,17 @@ class SharedWifiRejectedStore(context: Context) {
             var changed = false
 
             credentials.forEach { cred ->
+                val credBssid = WifiCredentialKeys.normalizeBssid(cred.bssid)
                 val removeKeys = entries.filter { (_, rejected) ->
-                    rejected.ssid.equals(cred.ssid, ignoreCase = true) &&
-                        rejected.password != cred.password
+                    if (!rejected.ssid.equals(cred.ssid, ignoreCase = true)) return@filter false
+                    if (rejected.password == cred.password) return@filter false
+                    val rejectedBssid = WifiCredentialKeys.normalizeBssid(rejected.bssid)
+                    when {
+                        credBssid.isNotEmpty() && rejectedBssid.isNotEmpty() ->
+                            rejectedBssid == credBssid
+                        credBssid.isEmpty() -> rejectedBssid.isEmpty()
+                        else -> false
+                    }
                 }.keys
                 removeKeys.forEach { key ->
                     entries.remove(key)

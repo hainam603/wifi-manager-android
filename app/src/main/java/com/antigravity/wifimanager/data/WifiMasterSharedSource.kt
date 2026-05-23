@@ -32,4 +32,34 @@ class WifiMasterSharedSource {
             )
         }
     }
+
+    /** Tra một hotspot theo ID bản ghi WifiMaster (nhanh, không cần quét GPS). */
+    suspend fun fetchById(wifiMasterId: Long): SharedWifiCredential? {
+        if (wifiMasterId <= 0L || wifiMasterId > Int.MAX_VALUE) return null
+        return suspendCoroutine { continuation ->
+            wifiMaster.getWifiById(
+                wifiMasterId.toInt(),
+                onCompleted = { json ->
+                    if (json.contains("No Hotspot", ignoreCase = true) ||
+                        json.contains("not found", ignoreCase = true)
+                    ) {
+                        continuation.resume(null)
+                        return@getWifiById
+                    }
+                    val parsed = SharedWifiJsonParser.parse(
+                        json,
+                        defaultProvider = "WifiMaster",
+                        userLat = null,
+                        userLng = null
+                    )
+                    continuation.resume(
+                        parsed.firstOrNull()?.copy(wifiMasterId = wifiMasterId)
+                    )
+                },
+                onError = {
+                    continuation.resume(null)
+                }
+            )
+        }
+    }
 }
