@@ -43,7 +43,12 @@ object ScannerUiMapper {
     fun buildQuick(
         networks: List<WifiApInfo>,
         connection: WifiConnectionState
-    ): ScannerDisplayState = build(networks, connection) { _, _ -> null }
+    ): ScannerDisplayState = build(
+        networks = networks,
+        connection = connection,
+        resolvePassword = { _, _ -> null },
+        resolveSimilarPassword = { null }
+    )
 
     private val wifiApComparator = compareByDescending<WifiApInfo> { it.signalPercent }
         .thenByDescending { it.is5GHz }
@@ -54,7 +59,8 @@ object ScannerUiMapper {
     fun build(
         networks: List<WifiApInfo>,
         connection: WifiConnectionState,
-        resolvePassword: (ssid: String, bssid: String?) -> String? = { _, _ -> null }
+        resolvePassword: (ssid: String, bssid: String?) -> String? = { _, _ -> null },
+        resolveSimilarPassword: (ssid: String) -> Pair<String, String>? = { null }
     ): ScannerDisplayState {
         val connectedSsid = resolveConnectedSsid(connection)
         val connectedAp = resolveConnectedAp(networks, connection, connectedSsid)
@@ -71,26 +77,29 @@ object ScannerUiMapper {
                 hasSystemCredential = hasSystemCredential,
                 resolvedPassword = resolvedPassword
             )
+            val similar = resolveSimilarPassword(ap.ssid)
             return ScannerApRowModel(
                 ap = ap,
                 passwordDisplay = passwordDisplay,
                 needsPassword = needsPassword,
                 hasSystemCredential = hasSystemCredential,
                 savedPassword = resolvedPassword,
-                similarSsid = null,
-                similarPassword = null
+                similarSsid = similar?.first,
+                similarPassword = similar?.second
             )
         }
 
         val savedRows = networks
-            .filter { it.ssid != connectedSsid && it.hasStoredPassword }
+            .filter { it.ssid != connectedSsid && it.isSaved }
             .sortedWith(wifiApComparator)
             .map { rowModel(it, isNearbyGroup = false) }
+            .filter { it.passwordDisplay != null }
 
         val nearbyRows = networks
-            .filter { it.ssid != connectedSsid && !it.hasStoredPassword }
+            .filter { it.ssid != connectedSsid && !it.isSaved }
             .sortedWith(wifiApComparator)
             .map { rowModel(it, isNearbyGroup = true) }
+            .filter { it.passwordDisplay != null }
 
         val connectedRow = connectedAp?.let { rowModel(it, isNearbyGroup = false) }
 
@@ -103,13 +112,17 @@ object ScannerUiMapper {
 
     private fun resolveConnectedSsid(connection: WifiConnectionState): String? {
         if (!connection.isConnected || connection.ssid.isEmpty()) return null
-        if (connection.ssid == "Mạng WiFi" ||
-            connection.ssid == "Đang kết nối WiFi" ||
-            connection.ssid == "<unknown ssid>"
+        var ssid = connection.ssid.trim()
+        if (ssid.startsWith("\"") && ssid.endsWith("\"") && ssid.length >= 2) {
+            ssid = ssid.substring(1, ssid.length - 1)
+        }
+        if (ssid == "Mạng WiFi" ||
+            ssid == "Đang kết nối WiFi" ||
+            ssid == "<unknown ssid>"
         ) {
             return null
         }
-        return connection.ssid
+        return ssid
     }
 
     private fun resolveConnectedAp(
@@ -176,6 +189,10 @@ object ScannerUiMapper {
             }
         }
 
-        return null
+        return when {
+            hasSystemCredential && (isNearbyGroup && ap.isReadyToConnect || !isNearbyGroup) ->
+                "(đã lưu trong hệ thống)"
+            else -> null
+        }
     }
 }

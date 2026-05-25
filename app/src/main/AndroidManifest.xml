@@ -56,6 +56,15 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".receiver.WifiAutoScheduleReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.antigravity.wifimanager.ACTION_AUTO_UPDATE_WIFI_DATA" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".service.WifiMonitorService"
             android:enabled="true"

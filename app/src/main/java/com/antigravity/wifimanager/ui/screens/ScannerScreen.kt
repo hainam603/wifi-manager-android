@@ -48,8 +48,9 @@ fun ScannerScreen(
     isPasswordBusy: Boolean = false,
     refreshingPasswordApKey: String? = null,
     connectedSignalPercent: Int = 0,
+    scanCounter: Int = 0,
     onRefreshScan: () -> Unit,
-    onConnectNetwork: (ssid: String, bssid: String) -> Unit,
+    onConnectNetwork: (ssid: String, bssid: String, password: String?) -> Unit,
     onHasSystemCredential: (String) -> Boolean,
     onGetSavedPassword: (String, String?) -> String?,
     onSavePassword: (String, String, String?) -> Unit,
@@ -84,15 +85,11 @@ fun ScannerScreen(
         quickFallback.hasRows() -> quickFallback
         else -> ScannerDisplayState.Empty
     }
-
-    val connectedRow = effectiveDisplayState.connectedRow
-    val savedRows = effectiveDisplayState.savedRows
-    val nearbyRows = effectiveDisplayState.nearbyRows
     val hasDisplayRows = effectiveDisplayState.hasRows()
     val showScanningPlaceholder = isScanning && networkCount == 0
-    val showEmptyPlaceholder = networkCount == 0 && !isScanning
-    val showPreparingList = networkCount > 0 && !hasDisplayRows
-    val showList = networkCount > 0 && hasDisplayRows
+    val showEmptyPlaceholder = !isScanning && !hasDisplayRows
+    val showPreparingList = isScanning && networkCount > 0 && !hasDisplayRows
+    val showList = hasDisplayRows
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -130,7 +127,7 @@ fun ScannerScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Tìm thấy $networkCount mạng WiFi xung quanh bạn",
+                text = "Tìm thấy ${effectiveDisplayState.totalRowCount()} mạng WiFi có mật khẩu",
                 fontSize = 13.sp,
                 color = TextSecondary
             )
@@ -192,7 +189,7 @@ fun ScannerScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "Chưa có mạng — bấm nút quét để tải danh sách",
+                            text = "Không tìm thấy mạng WiFi nào có mật khẩu",
                             color = TextSecondary,
                             fontSize = 14.sp
                         )
@@ -224,6 +221,7 @@ fun ScannerScreen(
                 ScannerNetworkList(
                     modifier = Modifier.weight(1f),
                     displayState = effectiveDisplayState,
+                    scanCounter = scanCounter,
                     connectedSignalPercent = connectedSignalPercent,
                     connectingApKey = connectingApKey,
                     connectFailedApKeys = connectFailedApKeys,
@@ -261,7 +259,11 @@ fun ScannerScreen(
             val activeSsid = passwordDialogSsid!!
             val activeBssid = passwordDialogBssid
             val savedPassword = onGetSavedPassword(activeSsid, activeBssid)
-            val hasSystemCredential = onHasSystemCredential(activeSsid)
+            val isCurrentlyConnected = connectionState.isConnected && 
+                connectionState.ssid.equals(activeSsid, ignoreCase = true)
+            val hasSystemCredential = onHasSystemCredential(activeSsid) || isCurrentlyConnected
+
+
 
             AlertDialog(
                 onDismissRequest = { passwordDialogSsid = null },
@@ -310,7 +312,8 @@ fun ScannerScreen(
                             if (rootConnectAvailable) {
                                 onConnectNetwork(
                                     activeSsid,
-                                    passwordDialogBssid ?: "02:00:00:00:00:00"
+                                    passwordDialogBssid ?: "02:00:00:00:00:00",
+                                    passwordInput
                                 )
                             }
                             passwordDialogSsid = null
@@ -337,19 +340,20 @@ fun ScannerScreen(
                 },
                 dismissButton = {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (!savedPassword.isNullOrEmpty()) {
+                        if (!savedPassword.isNullOrEmpty() || hasSystemCredential) {
                             TextButton(
                                 onClick = {
                                     onRemovePassword(activeSsid, activeBssid)
                                     passwordDialogSsid = null
                                     coroutineScope.launch {
-                                        snackbarHostState.showSnackbar("Đã xóa mật khẩu của '${activeSsid}'")
+                                        snackbarHostState.showSnackbar("Đã xóa và quên mạng '${activeSsid}'")
                                     }
                                 }
                             ) {
-                                Text("Xóa")
+                                Text("Xóa mạng")
                             }
                         }
+
                         TextButton(onClick = { passwordDialogSsid = null }) {
                             Text("Đóng")
                         }
@@ -364,12 +368,13 @@ fun ScannerScreen(
 private fun ScannerNetworkList(
     modifier: Modifier = Modifier,
     displayState: ScannerDisplayState,
+    scanCounter: Int = 0,
     connectedSignalPercent: Int,
     connectingApKey: String?,
     connectFailedApKeys: Set<String>,
     refreshingPasswordApKey: String?,
     rootConnectAvailable: Boolean,
-    onConnectNetwork: (String, String) -> Unit,
+    onConnectNetwork: (String, String, String?) -> Unit,
     onResolvePassword: (String, String?) -> String?,
     onRefreshPasswordForBssid: suspend (String, String) -> WifiCredentialRefreshResult,
     coroutineScope: kotlinx.coroutines.CoroutineScope,
@@ -377,6 +382,9 @@ private fun ScannerNetworkList(
     onOpenPasswordDialog: (ssid: String, bssid: String, initial: String, similarSsid: String?) -> Unit
 ) {
     val listState = rememberLazyListState()
+    LaunchedEffect(scanCounter) {
+        if (scanCounter > 0) listState.animateScrollToItem(0)
+    }
     val connectedRow = displayState.connectedRow
     val savedRows = displayState.savedRows
     val nearbyRows = displayState.nearbyRows
@@ -490,7 +498,7 @@ private fun ScannerApListItem(
     connectFailedApKeys: Set<String>,
     refreshingPasswordApKey: String?,
     rootConnectAvailable: Boolean,
-    onConnectNetwork: (String, String) -> Unit,
+    onConnectNetwork: (String, String, String?) -> Unit,
     onResolvePassword: (String, String?) -> String?,
     onRefreshPasswordForBssid: suspend (String, String) -> WifiCredentialRefreshResult,
     coroutineScope: kotlinx.coroutines.CoroutineScope,
@@ -510,11 +518,13 @@ private fun ScannerApListItem(
                 !ap.sharedProviderName.isNullOrBlank()
             )
 
+    val isConnectFailed = connectFailedApKeys.contains(apKey)
+
     WifiApRow(
         ap = ap,
         isConnectedState = isConnectedState,
         isConnecting = connectingApKey == apKey,
-        connectFailed = connectFailedApKeys.contains(apKey),
+        connectFailed = isConnectFailed,
         connectEnabled = rootConnectAvailable,
         connectBlocked = connectingApKey != null || refreshingPasswordApKey != null,
         passwordDisplay = row.passwordDisplay ?: row.savedPassword,
@@ -543,15 +553,17 @@ private fun ScannerApListItem(
                 !row.savedPassword.isNullOrEmpty() ||
                 row.hasSystemCredential ||
                 ap.hasStoredPassword
-            if (row.needsPassword && !hasAnySaved) {
+            if ((row.needsPassword && !hasAnySaved) || isConnectFailed) {
                 onOpenPasswordDialog(
                     ap.ssid,
                     ap.bssid,
-                    onResolvePassword(ap.ssid, ap.bssid) ?: row.similarPassword.orEmpty(),
+                    onResolvePassword(ap.ssid, ap.bssid)
+                        ?: row.savedPassword
+                        ?: row.similarPassword.orEmpty(),
                     row.similarSsid
                 )
             } else {
-                onConnectNetwork(ap.ssid, ap.bssid)
+                onConnectNetwork(ap.ssid, ap.bssid, null)
             }
         },
         onEditPasswordClick = {
@@ -631,24 +643,16 @@ private fun WifiApRow(
 
                 Spacer(modifier = Modifier.height(4.dp))
                 
-                if (isConnectedState) {
-                    Text(
-                        text = "Đang kết nối • Bảo mật: ${if (ap.securityType.contains("WPA", ignoreCase = true)) "WPA2/WPA3" else "Open"}",
-                        fontSize = 11.sp,
-                        color = subtitleColor
-                    )
-                } else {
-                    Text(
-                        text = "BSSID: ${ap.bssid}",
-                        fontSize = 11.sp,
-                        color = subtitleColor
-                    )
-                    Text(
-                        text = "Bảo mật: ${if (ap.securityType.contains("WPA", ignoreCase = true)) "WPA2/WPA3" else "Open"}",
-                        fontSize = 11.sp,
-                        color = subtitleColor
-                    )
-                }
+                Text(
+                    text = "BSSID: ${ap.bssid}",
+                    fontSize = 11.sp,
+                    color = subtitleColor
+                )
+                Text(
+                    text = "Bảo mật: ${if (ap.securityType.contains("WPA", ignoreCase = true)) "WPA2/WPA3" else "Open"}",
+                    fontSize = 11.sp,
+                    color = subtitleColor
+                )
 
                 if (isConnecting) {
                     Row(
@@ -667,56 +671,65 @@ private fun WifiApRow(
                             color = if (isConnectedState) Color(0xFFDBEAFE) else MaterialTheme.colorScheme.primary
                         )
                     }
-                } else if (ap.isSharedPasswordRejected) {
+                } else if (isConnectedState) {
                     Text(
-                        text = "Mật khẩu API không hợp lệ — chờ cập nhật",
+                        text = "Đang kết nối",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (isConnectedState) Color(0xFFFECACA) else WifiWeak
+                        color = Color(0xFF86EFAC)
                     )
-                    if (showRefreshPasswordButton) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        TextButton(
-                            onClick = onRefreshPasswordClick,
-                            enabled = !isRefreshingPassword && !connectBlocked,
-                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
-                            modifier = Modifier.height(32.dp)
-                        ) {
-                            if (isRefreshingPassword) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(14.dp),
-                                    strokeWidth = 2.dp
+                } else {
+                    if (ap.isSharedPasswordRejected) {
+                        Text(
+                            text = "Mật khẩu API không hợp lệ — chờ cập nhật",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WifiWeak
+                        )
+                        if (showRefreshPasswordButton) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            TextButton(
+                                onClick = onRefreshPasswordClick,
+                                enabled = !isRefreshingPassword && !connectBlocked,
+                                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                if (isRefreshingPassword) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
+                                Text(
+                                    text = if (isRefreshingPassword) "Đang cập nhật..." else "Cập nhật mật khẩu (BSSID)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
                             }
-                            Text(
-                                text = if (isRefreshingPassword) "Đang cập nhật..." else "Cập nhật mật khẩu (BSSID)",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
                         }
+                    } else if (connectFailed) {
+                        Text(
+                            text = "Kết nối thất bại — thử lại hoặc sửa mật khẩu",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WifiWeak
+                        )
+                    } else if (ap.isReadyToConnect) {
+                        Text(
+                            text = "Sẵn sàng kết nối",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WifiGood
+                        )
                     }
-                } else if (connectFailed && !ap.isSharedPasswordRejected) {
-                    Text(
-                        text = "Kết nối thất bại — thử lại hoặc sửa mật khẩu",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isConnectedState) Color(0xFFFECACA) else WifiWeak
-                    )
-                } else if (ap.isReadyToConnect) {
-                    Text(
-                        text = "Sẵn sàng kết nối",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isConnectedState) Color(0xFFBBF7D0) else WifiGood
-                    )
                 }
 
                 if (!passwordDisplay.isNullOrBlank()) {
@@ -724,7 +737,7 @@ private fun WifiApRow(
                         text = "Mật khẩu: $passwordDisplay",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (isConnectedState) Color(0xFFE0F2FE) else Accent
+                        color = if (isConnectedState) Color(0xFF86EFAC) else Accent
                     )
                 }
 

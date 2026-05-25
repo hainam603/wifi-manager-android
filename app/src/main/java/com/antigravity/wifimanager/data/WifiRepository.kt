@@ -29,6 +29,7 @@ class WifiRepository(private val context: Context) {
     private var rootAvailabilityCache: Boolean? = null
     private var cachedSavedPasswords: Map<String, String>? = null
     private val sharedWifiRepository = SharedWifiRepository(context)
+    private val recentlyForgottenSsids = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     companion object {
         private const val KEY_THRESHOLD = "threshold"
@@ -40,12 +41,17 @@ class WifiRepository(private val context: Context) {
         private const val KEY_SYSTEM_CONNECTED_SSIDS = "system_connected_ssids"
         private const val KEY_APP_MANAGED_SSIDS = "app_managed_ssids"
         private const val KEY_LAST_SWITCH_AT_MS = "last_switch_at_ms"
+        private const val KEY_AUTO_UPDATE_INTERVAL_DAYS = "offline_auto_update_interval_days"
+        private const val KEY_LAST_AUTO_UPDATE_MS = "offline_last_auto_update_ms"
         const val SCAN_CACHE_WINDOW_MS = 30_000L
         const val SYSTEM_PASSWORD_SYNC_WINDOW_MS = 120_000L
         const val SWITCH_COOLDOWN_MS = 60_000L
+        const val DEFAULT_AUTO_UPDATE_INTERVAL_DAYS = 1
     }
 
     fun isMonitoringEnabled(): Boolean = prefs.getBoolean(KEY_MONITORING_ENABLED, true)
+
+    fun isWifiEnabled(): Boolean = wifiManager.isWifiEnabled
 
     fun setMonitoringEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_MONITORING_ENABLED, enabled).apply()
@@ -74,6 +80,31 @@ class WifiRepository(private val context: Context) {
     fun isPrefer5GhzEnabled(): Boolean = prefs.getBoolean(KEY_PREFER_5GHZ, true)
     fun setPrefer5GhzEnabled(value: Boolean) = prefs.edit().putBoolean(KEY_PREFER_5GHZ, value).apply()
 
+    // --- Cấu hình tự động cập nhật dữ liệu WiFi offline ---
+
+    /** Chu kỳ tự động cập nhật (ngày). 0 = tắt tự động. */
+    fun getAutoUpdateIntervalDays(): Int =
+        prefs.getInt(KEY_AUTO_UPDATE_INTERVAL_DAYS, DEFAULT_AUTO_UPDATE_INTERVAL_DAYS)
+
+    fun setAutoUpdateIntervalDays(days: Int) {
+        prefs.edit().putInt(KEY_AUTO_UPDATE_INTERVAL_DAYS, days.coerceAtLeast(0)).apply()
+    }
+
+    fun getLastAutoUpdateMs(): Long = prefs.getLong(KEY_LAST_AUTO_UPDATE_MS, 0L)
+
+    fun setLastAutoUpdateMs(atMs: Long) {
+        prefs.edit().putLong(KEY_LAST_AUTO_UPDATE_MS, atMs).apply()
+    }
+
+    /**
+     * Chạy prefetch offline vùng địa lý hiện tại.
+     * Dùng bởi WifiAutoScheduleReceiver (AlarmManager) và nút cập nhật thủ công.
+     */
+    suspend fun runOfflinePrefetch() {
+        sharedWifiRepository.prefetchArea()
+        setLastAutoUpdateMs(System.currentTimeMillis())
+    }
+
     private fun calculateSignalPercent(rssi: Int): Int {
         val minRssi = -100
         val maxRssi = -55
@@ -88,24 +119,32 @@ class WifiRepository(private val context: Context) {
     // Lấy thông tin trạng thái mạng WiFi hiện đang kết nối
     @SuppressLint("HardwareIds")
     fun getCurrentConnectionState(): WifiConnectionState {
-        val activeNetwork = connectivityManager.activeNetwork ?: return WifiConnectionState()
-        val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return WifiConnectionState()
+        // Tìm bất kỳ mạng WiFi nào đang hoạt động trong hệ thống (kể cả không có Internet)
+        val wifiNetwork = connectivityManager.allNetworks.firstOrNull { net ->
+            val caps = connectivityManager.getNetworkCapabilities(net)
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        } ?: connectivityManager.activeNetwork ?: return WifiConnectionState()
+
+        val capabilities = connectivityManager.getNetworkCapabilities(wifiNetwork) ?: return WifiConnectionState()
         
-        // Nếu hệ thống xác nhận đây là mạng kết nối qua WiFi thì chắc chắn đang online
+        // Nếu hệ thống xác nhận đây là mạng kết nối qua WiFi thì chắc chắn đang kết nối
         if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
             return WifiConnectionState()
         }
 
+
         // Lấy thông tin WifiInfo từ transportInfo (Android 12+) hoặc connectionInfo (Android 11 trở xuống)
-        val wifiInfo: WifiInfo? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val transportWifiInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             capabilities.transportInfo as? WifiInfo
+        } else {
+            null
+        }
+        val finalWifiInfo = if (transportWifiInfo != null && !WifiCredentialKeys.isPlaceholderBssid(transportWifiInfo.bssid)) {
+            transportWifiInfo
         } else {
             @Suppress("DEPRECATION")
             wifiManager.connectionInfo
         }
-
-        // Dự phòng: Nếu transportInfo bị null, sử dụng phương pháp connectionInfo cũ
-        val finalWifiInfo = wifiInfo ?: @Suppress("DEPRECATION") wifiManager.connectionInfo
 
         if (finalWifiInfo == null) {
             return WifiConnectionState(
@@ -164,7 +203,7 @@ class WifiRepository(private val context: Context) {
             0
         }
 
-        val (ipAddress, dnsServers) = readActiveNetworkLinkInfo(activeNetwork)
+        val (ipAddress, dnsServers) = readActiveNetworkLinkInfo(wifiNetwork)
 
         return enrichConnectionFromScan(
             WifiConnectionState(
@@ -350,17 +389,159 @@ class WifiRepository(private val context: Context) {
         return prefs.getStringSet(KEY_APP_MANAGED_SSIDS, emptySet())?.contains(ssid) == true
     }
 
-    /** Xóa hoàn toàn mạng khỏi app (mật khẩu, tin cậy, đánh dấu thủ công). */
+    fun removeSuggestionForSsid(ssid: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                android.util.Log.e("WifiRepository", "removeSuggestionForSsid: target SSID='$ssid'")
+                
+                // 1. Dùng API chính thức của WifiManager để xóa suggestions thuộc về ứng dụng
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val currentSuggestions = wifiManager.networkSuggestions
+                    android.util.Log.e("WifiRepository", "removeSuggestionForSsid: current suggestions size=${currentSuggestions.size}")
+                    val targets = currentSuggestions.filter { suggestion ->
+                        val cleanSsid = suggestion.ssid?.replace("\"", "").orEmpty()
+                        cleanSsid.equals(ssid, ignoreCase = true)
+                    }
+                    if (targets.isNotEmpty()) {
+                        val status = wifiManager.removeNetworkSuggestions(targets)
+                        android.util.Log.e("WifiRepository", "removeSuggestionForSsid (API 30+): matched ${targets.size} suggestions, remove status=$status")
+                    }
+                }
+                
+                // 2. Dự phòng brute force bằng API (xây dựng lại các cấu hình suggestion có thể có và gửi lệnh xóa)
+                val fallbackList = mutableListOf<WifiNetworkSuggestion>()
+                val psk = resolveConnectionPassword(ssid)
+                
+                // Bản WPA2
+                try {
+                    val b = WifiNetworkSuggestion.Builder().setSsid(ssid)
+                    if (!psk.isNullOrBlank()) b.setWpa2Passphrase(psk)
+                    fallbackList.add(b.build())
+                } catch (_: Exception) {}
+                
+                // Bản WPA3
+                try {
+                    val b = WifiNetworkSuggestion.Builder().setSsid(ssid)
+                    if (!psk.isNullOrBlank()) b.setWpa3Passphrase(psk)
+                    fallbackList.add(b.build())
+                } catch (_: Exception) {}
+                
+                // Bản Open
+                try {
+                    fallbackList.add(WifiNetworkSuggestion.Builder().setSsid(ssid).build())
+                } catch (_: Exception) {}
+                
+                if (fallbackList.isNotEmpty()) {
+                    val statusFallback = wifiManager.removeNetworkSuggestions(fallbackList)
+                    android.util.Log.e("WifiRepository", "removeSuggestionForSsid fallback API status=$statusFallback")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("WifiRepository", "removeSuggestionForSsid API error", e)
+            }
+            
+            // 3. Nếu thiết bị đã Root, chạy thêm lệnh shell để xóa suggestion được thêm bởi shell/hệ thống
+            if (isRootAvailable()) {
+                try {
+                    val qSsid = shellQuote(ssid)
+                    val cmd = "cmd wifi remove-suggestion $qSsid; cmd wifi remove-suggestion ${shellQuote("\"" + ssid + "\"")};"
+                    android.util.Log.e("WifiRepository", "removeSuggestionForSsid (Root): executing '$cmd'")
+                    val res = execRootShellScript(cmd)
+                    android.util.Log.e("WifiRepository", "removeSuggestionForSsid (Root) result=$res")
+                } catch (e: Exception) {
+                    android.util.Log.e("WifiRepository", "removeSuggestionForSsid Root error", e)
+                }
+            }
+        }
+    }
+
+    /** Xóa hoàn toàn mạng khỏi app và khỏi hệ thống qua Root (nếu có). */
     fun forgetNetwork(ssid: String, bssid: String? = null) {
+        android.util.Log.e("WifiRepository", "forgetNetwork entry: ssid='$ssid', bssid='$bssid'")
+        if (ssid.isNotBlank()) {
+            recentlyForgottenSsids[ssid.lowercase(Locale.getDefault())] = System.currentTimeMillis()
+        }
         removeSavedWifiPassword(ssid, bssid)
+        removeSuggestionForSsid(ssid)
         val stillHasPassword = getSavedWifiPasswords().keys.any { key ->
             WifiCredentialKeys.parseStorageKey(key).first.equals(ssid, ignoreCase = true)
         }
+        android.util.Log.e("WifiRepository", "forgetNetwork: stillHasPassword=$stillHasPassword")
         if (!stillHasPassword) {
             removeAllowedSsid(ssid)
             unmarkAppManaged(ssid)
+            
+            // Xóa khỏi danh sách đã từng kết nối thành công của hệ thống lưu trong app
+            val verifiedConnected = (prefs.getStringSet(KEY_SYSTEM_CONNECTED_SSIDS, emptySet()) ?: emptySet()).toMutableSet()
+            if (verifiedConnected.remove(ssid)) {
+                android.util.Log.e("WifiRepository", "forgetNetwork: removed '$ssid' from KEY_SYSTEM_CONNECTED_SSIDS")
+                prefs.edit().putStringSet(KEY_SYSTEM_CONNECTED_SSIDS, verifiedConnected).apply()
+            }
+        }
+
+        val hasRoot = isRootAvailable()
+        android.util.Log.e("WifiRepository", "forgetNetwork: hasRoot=$hasRoot")
+        
+        // Luôn kiểm tra xem mạng bị xóa có phải mạng đang kết nối hiện tại không
+        val currentState = getCurrentConnectionState()
+        val isCurrentNetwork = currentState.isConnected && ssidsMatch(currentState.ssid, ssid)
+        android.util.Log.e("WifiRepository", "forgetNetwork: isCurrentNetwork=$isCurrentNetwork, currentSsid='${currentState.ssid}'")
+
+        if (hasRoot && ssid.isNotBlank()) {
+            try {
+                // Lấy danh sách mạng lưu trong hệ thống
+                android.util.Log.e("WifiRepository", "forgetNetwork: executing 'cmd wifi list-networks'")
+                val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "cmd wifi list-networks"))
+                val stdout = process.inputStream.bufferedReader().use { it.readText() }
+                val stderr = process.errorStream.bufferedReader().use { it.readText() }
+                process.waitFor()
+                val exitValue = process.exitValue()
+                process.destroy()
+
+                android.util.Log.e("WifiRepository", "forgetNetwork: 'cmd wifi list-networks' exitValue=$exitValue, stdout length=${stdout.length}, stderr='$stderr'")
+
+                val lines = stdout.split("\n")
+                for (line in lines) {
+                    val parsed = parseSystemNetworkLine(line) ?: continue
+                    val parsedSsid = parsed.second
+                    val networkId = parsed.first
+                    
+                    if (parsedSsid.equals(ssid, ignoreCase = true) && networkId != null) {
+                        val cmd = "cmd wifi forget-network $networkId"
+                        android.util.Log.e("WifiRepository", "forgetNetwork: MATCH! networkId=$networkId, executing '$cmd'")
+                        val cmdResult = execRootShellScript(cmd)
+                        android.util.Log.e("WifiRepository", "forgetNetwork: '$cmd' result=$cmdResult")
+                    }
+                }
+                
+                // Nếu là mạng đang kết nối, chúng ta ngắt kết nối và tắt/bật WiFi để làm mới cache hệ thống
+                if (isCurrentNetwork) {
+                    android.util.Log.e("WifiRepository", "forgetNetwork: Connected to target network. Forcing root disconnect cycle.")
+                    try {
+                        wifiManager.disconnect()
+                    } catch (e: Exception) {
+                        android.util.Log.e("WifiRepository", "forgetNetwork: wifiManager.disconnect exception", e)
+                    }
+                    val cycleCmd = "cmd wifi set-wifi-enabled disabled; sleep 0.8; cmd wifi set-wifi-enabled enabled"
+                    android.util.Log.e("WifiRepository", "forgetNetwork: executing wifi cycle: '$cycleCmd'")
+                    val cycleResult = execRootShellScript(cycleCmd)
+                    android.util.Log.e("WifiRepository", "forgetNetwork: cycleResult=$cycleResult")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("WifiRepository", "forgetNetwork exception during root delete", e)
+            }
+        } else {
+            // Không có root, nhưng nếu là mạng đang kết nối, thử ngắt kết nối thông thường
+            if (isCurrentNetwork) {
+                try {
+                    android.util.Log.e("WifiRepository", "forgetNetwork: No root, trying normal disconnect")
+                    wifiManager.disconnect()
+                } catch (e: Exception) {
+                    android.util.Log.e("WifiRepository", "forgetNetwork: wifiManager.disconnect exception (no root)", e)
+                }
+            }
         }
     }
+
 
     private fun invalidateSavedPasswordCache() {
         cachedSavedPasswords = null
@@ -430,12 +611,36 @@ class WifiRepository(private val context: Context) {
         return !getSavedWifiPassword(ssid, bssid).isNullOrEmpty()
     }
 
-    fun hasStoredCredential(ssid: String): Boolean {
+    fun hasStoredCredential(
+        ssid: String,
+        currentConnectedSsid: String?,
+        isCurrentConnected: Boolean,
+        systemSavedSsids: Set<String>? = null
+    ): Boolean {
+        val isCurrentlyConnected = isCurrentConnected && 
+            currentConnectedSsid != null &&
+            ssidsMatch(currentConnectedSsid, ssid)
+
+        val allowed = isSsidAllowed(ssid)
+        val inSystemSaved = allowed && (systemSavedSsids?.contains(ssid) ?: readSystemSavedSsids().contains(ssid))
+        val inSystemConnected = allowed && isSystemConnectedSsid(ssid)
+
         return hasSavedWifiPassword(ssid) ||
-            isSystemConnectedSsid(ssid) ||
-            getSimilarSsidWithSavedPassword(ssid) != null ||
-            !sharedWifiRepository.getSharedPassword(ssid).isNullOrBlank()
+            isCurrentlyConnected ||
+            inSystemConnected ||
+            inSystemSaved
     }
+
+    fun hasStoredCredential(ssid: String): Boolean {
+        val current = getCurrentConnectionState()
+        return hasStoredCredential(
+            ssid = ssid,
+            currentConnectedSsid = current.ssid,
+            isCurrentConnected = current.isConnected,
+            systemSavedSsids = readSystemSavedSsids()
+        )
+    }
+
 
     fun hasConnectableCredential(ssid: String): Boolean = hasStoredCredential(ssid)
 
@@ -512,39 +717,133 @@ class WifiRepository(private val context: Context) {
     fun removeSavedWifiPassword(ssid: String, bssid: String? = null) {
         val passwords = getSavedWifiPasswords().toMutableMap()
         var changed = false
-        if (WifiCredentialKeys.isValidBssid(bssid)) {
-            changed = passwords.remove(WifiCredentialKeys.storageKey(ssid, bssid)) != null
-        } else {
-            val keysToRemove = passwords.keys.filter { key ->
-                val (storedSsid, _) = WifiCredentialKeys.parseStorageKey(key)
-                storedSsid.equals(ssid, ignoreCase = true)
-            }
-            keysToRemove.forEach { if (passwords.remove(it) != null) changed = true }
+        
+        // 1. Luôn xóa key dạng trần (plain SSID)
+        if (passwords.remove(ssid) != null) {
+            changed = true
+            android.util.Log.e("WifiRepository", "removeSavedWifiPassword: removed plain key '$ssid'")
         }
+        
+        // 2. Luôn xóa key dạng storageKey(ssid, bssid) nếu bssid hợp lệ
+        if (WifiCredentialKeys.isValidBssid(bssid)) {
+            val storageKey = WifiCredentialKeys.storageKey(ssid, bssid)
+            if (passwords.remove(storageKey) != null) {
+                changed = true
+                android.util.Log.e("WifiRepository", "removeSavedWifiPassword: removed storageKey '$storageKey'")
+            }
+        }
+        
+        // 3. Xóa tất cả các key có SSID khớp (bất kể BSSID nào) để sạch sẽ hoàn toàn
+        val keysToRemove = passwords.keys.filter { key ->
+            val (storedSsid, _) = WifiCredentialKeys.parseStorageKey(key)
+            storedSsid.equals(ssid, ignoreCase = true)
+        }
+        keysToRemove.forEach { key ->
+            if (passwords.remove(key) != null) {
+                changed = true
+                android.util.Log.e("WifiRepository", "removeSavedWifiPassword: removed matched key '$key'")
+            }
+        }
+        
         if (changed) {
             persistSavedWifiPasswords(passwords)
         }
     }
 
-    @SuppressLint("MissingPermission")
-    private fun readSystemSavedSsids(): MutableSet<String> {
-        val systemSsids = mutableSetOf<String>()
+    private fun parseSystemNetworkLine(line: String): Pair<Int?, String>? {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty() || 
+            trimmed.startsWith("Network Id", ignoreCase = true) || 
+            trimmed.startsWith("NetworkID", ignoreCase = true) ||
+            trimmed.startsWith("Network ID", ignoreCase = true)
+        ) {
+            return null
+        }
+        
+        // Cắt cột theo chỉ số cố định (fixed width):
+        // Network Id: từ đầu đến trước index 13
+        // SSID: từ index 13 đến trước index 46 (hoặc hết nếu không đủ dài)
+        if (line.length < 14) return null
+        
+        val idStr = line.substring(0, 13.coerceAtMost(line.length)).trim()
+        val networkId = idStr.toIntOrNull()
+        
+        val ssidStr = if (line.length > 46) {
+            line.substring(13, 46)
+        } else {
+            line.substring(13)
+        }.trim()
+        
+        // Loại bỏ dấu nháy kép bọc ngoài SSID nếu có
+        var ssid = ssidStr
+        if (ssid.startsWith("\"") && ssid.endsWith("\"")) {
+            ssid = ssid.substring(1, ssid.length - 1)
+        }
+        
+        return Pair(networkId, ssid.trim())
+    }
+
+    private fun getActiveRecentlyForgottenSsids(): Set<String> {
+        val now = System.currentTimeMillis()
+        recentlyForgottenSsids.entries.removeIf { now - it.value > 5000L }
+        return recentlyForgottenSsids.keys
+    }
+
+    private fun readSystemSavedSsidsFromRootCmd(): Set<String> {
+        val ssids = mutableSetOf<String>()
         try {
-            @Suppress("DEPRECATION")
-            val configured = wifiManager.configuredNetworks
-            if (configured != null) {
-                for (config in configured) {
-                    var s = config.SSID ?: continue
-                    if (s.startsWith("\"") && s.endsWith("\"")) {
-                        s = s.substring(1, s.length - 1)
-                    }
-                    if (s.isNotEmpty() && s != "<unknown ssid>") {
-                        systemSsids.add(s)
-                    }
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "cmd wifi list-networks"))
+            val stdout = process.inputStream.bufferedReader().use { it.readText() }
+            process.waitFor()
+            process.destroy()
+
+            val lines = stdout.split("\n")
+            for (line in lines) {
+                val parsed = parseSystemNetworkLine(line) ?: continue
+                if (parsed.second.isNotEmpty()) {
+                    ssids.add(parsed.second)
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("WifiRepository", "readSystemSavedSsidsFromRootCmd exception", e)
+        }
+        return ssids
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun readSystemSavedSsids(): MutableSet<String> {
+        val systemSsids = mutableSetOf<String>()
+        if (isRootAvailable()) {
+            val rootSsids = readSystemSavedSsidsFromRootCmd()
+            if (rootSsids.isNotEmpty()) {
+                systemSsids.addAll(rootSsids)
+            }
+        } else {
+            try {
+                @Suppress("DEPRECATION")
+                val configured = wifiManager.configuredNetworks
+                if (configured != null) {
+                    for (config in configured) {
+                        var s = config.SSID ?: continue
+                        if (s.startsWith("\"") && s.endsWith("\"")) {
+                            s = s.substring(1, s.length - 1)
+                        }
+                        if (s.isNotEmpty() && s != "<unknown ssid>") {
+                            systemSsids.add(s)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        // Lọc bỏ các SSID vừa bị xóa để tránh bị re-sync do OS lag
+        val forgotten = getActiveRecentlyForgottenSsids()
+        if (forgotten.isNotEmpty()) {
+            systemSsids.removeAll { ssid ->
+                forgotten.contains(ssid.lowercase(Locale.getDefault()))
+            }
         }
         return systemSsids
     }
@@ -558,23 +857,34 @@ class WifiRepository(private val context: Context) {
                 it != "Mạng WiFi" && it != "Đang kết nối WiFi" && it != "<unknown ssid>"
         }
 
+        val verifiedConnected = (prefs.getStringSet(KEY_SYSTEM_CONNECTED_SSIDS, emptySet()) ?: emptySet())
+            .toMutableSet()
+
         val passwords = getSavedWifiPasswords().toMutableMap()
         passwords.keys.toList().forEach { ssid ->
-            if (ssid !in systemSsids && !isAppManaged(ssid) && ssid != connectedSsid) {
+            // Bị xóa khỏi OS (trước đó đã từng kết nối thành công/đã ở trong OS)
+            val userDeletedFromOS = ssid !in systemSsids && verifiedConnected.contains(ssid)
+            // OS cũ không có quản lý bởi app
+            val staleNotManaged = ssid !in systemSsids && !isAppManaged(ssid)
+
+            if ((userDeletedFromOS || staleNotManaged) && ssid != connectedSsid) {
                 passwords.remove(ssid)
+                unmarkAppManaged(ssid)
             }
         }
         persistSavedWifiPasswords(passwords)
 
         val allowed = getAllowedSsids().toMutableSet()
         allowed.removeAll { ssid ->
-            ssid !in systemSsids && !isAppManaged(ssid) && ssid != connectedSsid
+            val userDeletedFromOS = ssid !in systemSsids && verifiedConnected.contains(ssid)
+            val staleNotManaged = ssid !in systemSsids && !isAppManaged(ssid)
+            (userDeletedFromOS || staleNotManaged) && ssid != connectedSsid
         }
 
-        val verifiedConnected = (prefs.getStringSet(KEY_SYSTEM_CONNECTED_SSIDS, emptySet()) ?: emptySet())
-            .toMutableSet()
         verifiedConnected.removeAll { ssid ->
-            ssid !in systemSsids && !isAppManaged(ssid) && ssid != connectedSsid
+            val userDeletedFromOS = ssid !in systemSsids && verifiedConnected.contains(ssid)
+            val staleNotManaged = ssid !in systemSsids && !isAppManaged(ssid)
+            (userDeletedFromOS || staleNotManaged) && ssid != connectedSsid
         }
 
         prefs.edit()
@@ -615,6 +925,15 @@ class WifiRepository(private val context: Context) {
     }
 
     private fun readSystemWifiConfigsFromRoot(): Map<String, SystemWifiConfig> {
+        try {
+            val findProc = Runtime.getRuntime().exec(arrayOf("su", "-c", "ls -la /data/misc/apexdata/com.android.wifi/"))
+            val findOut = findProc.inputStream.bufferedReader().use { it.readText() }
+            findProc.waitFor()
+            android.util.Log.e("WifiRepository", "readSystemWifiConfigsFromRoot: ls -la wifi apexdata:\n$findOut")
+        } catch (e: Exception) {
+            android.util.Log.e("WifiRepository", "readSystemWifiConfigsFromRoot: find exception", e)
+        }
+
         val paths = listOf(
             "/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml",
             "/data/misc/wifi/WifiConfigStore.xml"
@@ -635,6 +954,9 @@ class WifiRepository(private val context: Context) {
                 if (xml.isNotBlank() && xml.contains("<Network>")) {
                     val parsed = parseWifiConfigStore(xml)
                     android.util.Log.e("WifiRepository", "readSystemWifiConfigsFromRoot: parsed ${parsed.size} configs from $path")
+                    parsed.forEach { (ssid, cfg) ->
+                        android.util.Log.e("WifiRepository", "readSystemWifiConfigsFromRoot parsed SSID: '$ssid', psk.length=${cfg.psk.length}, hasEverConnected=${cfg.hasEverConnected}")
+                    }
                     if (parsed.isNotEmpty()) {
                         return parsed
                     }
@@ -655,6 +977,10 @@ class WifiRepository(private val context: Context) {
     }
 
     fun syncPasswordsFromSystem(forceRefresh: Boolean = false) {
+        if (!wifiManager.isWifiEnabled) {
+            return
+        }
+
         if (forceRefresh) {
             rootAvailabilityCache = null
         }
@@ -685,7 +1011,11 @@ class WifiRepository(private val context: Context) {
         if (isRoot && shouldSyncRoot) {
             rootConfigs.values.forEach { cfg ->
                 if (!cfg.hasEverConnected) return@forEach
-                val trustedBySystem = fromConfigured.isEmpty() || cfg.ssid in fromConfigured
+                val trustedBySystem = if (isRoot) {
+                    cfg.ssid in fromConfigured
+                } else {
+                    fromConfigured.isEmpty() || cfg.ssid in fromConfigured
+                }
                 if (!trustedBySystem) return@forEach
 
                 systemSsids.add(cfg.ssid)
@@ -712,52 +1042,67 @@ class WifiRepository(private val context: Context) {
 
     fun getCachedScanResults(): List<WifiApInfo> = lastScanResults
 
-    @Suppress("DEPRECATION")
-    private fun waitForWifiScanResults(timeoutMs: Long = 4500L, pollMs: Long = 250L): List<android.net.wifi.ScanResult> {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        var latest: List<android.net.wifi.ScanResult> = emptyList()
-        while (System.currentTimeMillis() < deadline) {
-            latest = wifiManager.scanResults.orEmpty()
-            if (latest.isNotEmpty()) return latest
-            try {
-                Thread.sleep(pollMs)
-            } catch (_: InterruptedException) {
-                break
-            }
-        }
-        return latest
-    }
-
-    // Quét tìm danh sách các mạng WiFi khả dụng xung quanh
+    // Quét tìm danh sách các mạng WiFi khả dụng xung quanh.
+    // Đọc ngay từ wifiManager.scanResults (OS cache) — không blocking, không delay.
+    // forceRefresh=true: trigger startScan() để OS làm mới lần sau, nhưng trả về ngay kết quả hiện tại.
+    // Kết quả mới nhất sẽ được cập nhật qua SCAN_RESULTS_AVAILABLE_ACTION broadcast trong WifiMonitorService.
     @SuppressLint("MissingPermission")
     fun scanNearbyNetworks(forceRefresh: Boolean = false): List<WifiApInfo> {
         try {
             val now = System.currentTimeMillis()
+            // Dùng app cache nếu còn hiệu lực và không force
             if (!forceRefresh && lastScanResults.isNotEmpty() && (now - lastScanAtMs) < SCAN_CACHE_WINDOW_MS) {
                 lastScanUsedCache = true
-                return lastScanResults
+                val current = getCurrentConnectionState()
+                val systemSaved = readSystemSavedSsids()
+                val updated = lastScanResults.map { ap ->
+                    ap.copy(
+                        isSaved = isSsidAllowed(ap.ssid),
+                        hasStoredPassword = hasStoredCredential(
+                            ssid = ap.ssid,
+                            currentConnectedSsid = current.ssid,
+                            isCurrentConnected = current.isConnected,
+                            systemSavedSsids = systemSaved
+                        )
+                    )
+                }
+                val enriched = sharedWifiRepository.enrichAccessPoints(updated, this)
+                    .sortedWith(
+                        compareByDescending<WifiApInfo> { it.isReadyToConnect }
+                            .thenByDescending { it.isSaved }
+                            .thenByDescending { it.signalPercent }
+                            .thenByDescending { it.is5GHz }
+                            .thenByDescending { it.hasStoredPassword }
+                            .thenBy { it.ssid.lowercase(Locale.getDefault()) }
+                    )
+                lastScanResults = enriched
+                return enriched
             }
 
-            // Đồng bộ nhẹ — không đọc WifiConfigStore.xml mỗi lần bấm quét (rất chậm trên root)
+            // Đồng bộ nhẹ — không đọc WifiConfigStore.xml mỗi lần quét (rất chậm trên root)
             syncPasswordsFromSystem(forceRefresh = false)
 
-            @Suppress("DEPRECATION")
-            val scanResults = if (forceRefresh) {
-                wifiManager.startScan()
-                waitForWifiScanResults()
-            } else {
-                wifiManager.scanResults
+            // Nếu forceRefresh: yêu cầu OS làm mới scan (không chờ kết quả — tránh block UI)
+            // OS sẽ broadcast SCAN_RESULTS_AVAILABLE_ACTION khi có kết quả mới
+            if (forceRefresh) {
+                @Suppress("DEPRECATION")
+                wifiManager.startScan() // fire-and-forget, kết quả đến qua broadcast
             }
-            if (scanResults.isNullOrEmpty()) {
+
+            // Đọc kết quả hiện tại từ OS ngay lập tức (không block)
+            @Suppress("DEPRECATION")
+            val rawResults = wifiManager.scanResults.orEmpty()
+
+            if (rawResults.isEmpty()) {
                 lastScanUsedCache = true
                 return if (lastScanResults.isNotEmpty()) lastScanResults else emptyList()
             }
 
-            if (sharedWifiRepository.isEnabled()) {
-                sharedWifiRepository.refreshForScan(forceRefresh = forceRefresh)
-            }
+            // refreshForScan() đã là no-op — mật khẩu chỉ lấy từ offline store (xem enrichAccessPoints)
 
-            val processed = scanResults
+            val current = getCurrentConnectionState()
+            val systemSaved = readSystemSavedSsids()
+            val processed = rawResults
                 .filter { !it.SSID.isNullOrEmpty() }
                 .map {
                     val percent = calculateSignalPercent(it.level)
@@ -767,11 +1112,16 @@ class WifiRepository(private val context: Context) {
                         signalPercent = percent,
                         frequencyMhz = it.frequency,
                         isSaved = isSsidAllowed(it.SSID),
-                        hasStoredPassword = hasStoredCredential(it.SSID),
+                        hasStoredPassword = hasStoredCredential(
+                            ssid = it.SSID,
+                            currentConnectedSsid = current.ssid,
+                            isCurrentConnected = current.isConnected,
+                            systemSavedSsids = systemSaved
+                        ),
                         securityType = it.capabilities ?: "Open"
                     )
                 }
-
+            // enrichAccessPoints chỉ dùng offline store — không gọi API online
             val enriched = sharedWifiRepository.enrichAccessPoints(processed, this)
                 .sortedWith(
                     compareByDescending<WifiApInfo> { it.isReadyToConnect }
@@ -791,6 +1141,85 @@ class WifiRepository(private val context: Context) {
             return lastScanResults
         }
     }
+
+    /**
+     * Quét WiFi hệ thống thuần tuý, không kết hợp dữ liệu chia sẻ cộng đồng/API.
+     * Trả về danh sách các mạng chỉ với thông tin từ hệ thống.
+     */
+    @SuppressLint("MissingPermission")
+    fun scanSystemOnly(forceRefresh: Boolean = false): List<WifiApInfo> {
+        try {
+            if (forceRefresh) {
+                @Suppress("DEPRECATION")
+                wifiManager.startScan()
+            }
+
+            @Suppress("DEPRECATION")
+            val rawResults = wifiManager.scanResults.orEmpty()
+            val current = getCurrentConnectionState()
+            val systemSaved = readSystemSavedSsids()
+
+            return rawResults
+                .filter { !it.SSID.isNullOrEmpty() }
+                .map {
+                    val percent = calculateSignalPercent(it.level)
+                    val isSaves = systemSaved.contains(it.SSID) || isSsidAllowed(it.SSID)
+                    val hasStored = hasSavedWifiPassword(it.SSID, it.BSSID) || systemSaved.contains(it.SSID)
+                    val isSecured = it.capabilities.contains("WPA", ignoreCase = true) ||
+                            it.capabilities.contains("SAE", ignoreCase = true) ||
+                            it.capabilities.contains("PSK", ignoreCase = true)
+                    
+                    WifiApInfo(
+                        ssid = it.SSID,
+                        bssid = it.BSSID,
+                        signalPercent = percent,
+                        frequencyMhz = it.frequency,
+                        isSaved = isSaves,
+                        hasStoredPassword = hasStored,
+                        securityType = it.capabilities ?: "Open",
+                        isReadyToConnect = hasStored || !isSecured
+                    )
+                }
+                .sortedWith(
+                    compareByDescending<WifiApInfo> { current.isConnected && ssidsMatch(current.ssid, it.ssid) }
+                        .thenByDescending { it.isSaved }
+                        .thenByDescending { it.signalPercent }
+                        .thenByDescending { it.is5GHz }
+                        .thenBy { it.ssid.lowercase(Locale.getDefault()) }
+                )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return emptyList()
+        }
+    }
+
+    fun openSystemWifiSettings() {
+        try {
+            val intent = android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS).apply {
+                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun openSystemWifiPanel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val intent = android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI).apply {
+                    flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                openSystemWifiSettings()
+            }
+        } else {
+            openSystemWifiSettings()
+        }
+    }
+
+
 
     // Đăng ký danh sách gợi ý mạng với Android để tự động kết nối khi sóng mạng hiện tại yếu
     fun suggestNetworks(ssids: List<String>): Boolean {
@@ -999,8 +1428,6 @@ class WifiRepository(private val context: Context) {
         bssid: String? = null
     ): ConnectResult {
         val requiresPassword = requiresPasswordFromHint(securityHint)
-        val explicitPassword = password?.trim()
-            ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
         val psk = resolveConnectionPassword(ssid, password, bssid)
         val hasSystemProfile = isSystemConnectedSsid(ssid)
         val sharedCred = sharedWifiRepository.findSharedCredential(ssid, bssid, this)
@@ -1145,7 +1572,7 @@ class WifiRepository(private val context: Context) {
                 val exitCode = process.waitFor()
                 process.destroy()
                 suResponded = true
-                if (exitCode == 0 && output == "0") {
+                if (exitCode == 0 && (output == "0" || output.contains("root") || output.contains("uid=0"))) {
                     rootAvailabilityCache = true
                     return RootStatus.GRANTED
                 }
@@ -1164,15 +1591,21 @@ class WifiRepository(private val context: Context) {
     }
 
     fun isRootAvailable(): Boolean {
-        rootAvailabilityCache?.let { return it }
-        return getRootStatus() == RootStatus.GRANTED
+        if (rootAvailabilityCache == true) return true
+        val status = getRootStatus()
+        if (status == RootStatus.GRANTED) {
+            rootAvailabilityCache = true
+            return true
+        }
+        return false
     }
+
 
     fun ssidsMatch(current: String, target: String): Boolean {
         return current.trim().equals(target.trim(), ignoreCase = true)
     }
 
-    /** Gộp mật khẩu từ app, mạng tương tự, hoặc đồng bộ hệ thống — không nhầm BSSID/capabilities với mật khẩu. */
+    /** Gộp mật khẩu từ app, mạng tương tự, hoặc offline store — không gọi API online. */
     fun resolveConnectionPassword(
         ssid: String,
         explicitPassword: String? = null,
@@ -1188,7 +1621,8 @@ class WifiRepository(private val context: Context) {
         getSimilarSsidWithSavedPassword(ssid)?.second?.trim()
             ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
             ?.let { return it }
-        sharedWifiRepository.resolvePassword(ssid, bssid, this)
+        // Chỉ tra từ offline store — không gọi API online
+        sharedWifiRepository.resolvePasswordOfflineOnly(ssid, bssid, this)
             ?.trim()
             ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
             ?.let { return it }

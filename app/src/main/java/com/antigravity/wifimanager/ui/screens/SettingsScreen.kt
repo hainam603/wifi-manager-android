@@ -5,6 +5,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.*
@@ -21,6 +23,9 @@ import com.antigravity.wifimanager.ui.components.GlassCard
 import com.antigravity.wifimanager.ui.theme.TextSecondary
 import com.antigravity.wifimanager.ui.theme.WifiGood
 import com.antigravity.wifimanager.ui.theme.WifiWeak
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun SettingsScreen(
@@ -44,6 +49,10 @@ fun SettingsScreen(
     rootStatus: RootStatus,
     isBatteryOptimized: Boolean,
     monitoringEnabled: Boolean,
+    // Auto-update
+    autoUpdateIntervalDays: Int,
+    lastAutoUpdateMs: Long,
+    isAutoUpdating: Boolean,
     onThresholdChange: (Int) -> Unit,
     onAutoSwitchToggle: (Boolean) -> Unit,
     onPrefer5GhzToggle: (Boolean) -> Unit,
@@ -57,7 +66,9 @@ fun SettingsScreen(
     onSharedWifiUrlChange: (String) -> Unit,
     onSharedWifiApiKeyChange: (String) -> Unit,
     onRequestRoot: () -> Unit,
-    onRequestBatteryExemption: () -> Unit
+    onRequestBatteryExemption: () -> Unit,
+    onAutoUpdateIntervalChange: (Int) -> Unit,
+    onTriggerManualUpdate: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -496,6 +507,117 @@ fun SettingsScreen(
                         inactiveTrackColor = Color(0x22FFFFFF)
                     )
                 )
+            }
+        }
+
+        GlassCard(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CloudSync,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Tự động cập nhật dữ liệu WiFi",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Text(
+                    text = "Tự động tải lại dữ liệu WiFi offline trong vùng GPS theo chu kỳ. Cần Internet và GPS khi chạy.",
+                    fontSize = 12.sp,
+                    color = TextSecondary,
+                    lineHeight = 17.sp
+                )
+
+                // Hiển thị lần cập nhật gần nhất
+                val lastUpdateText = if (lastAutoUpdateMs <= 0L) {
+                    "Được cập nhật: Chưa từng"
+                } else {
+                    val fmt = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault())
+                    "Được cập nhật: ${fmt.format(Date(lastAutoUpdateMs))}"
+                }
+                Text(
+                    text = lastUpdateText,
+                    fontSize = 13.sp,
+                    color = if (lastAutoUpdateMs > 0L) WifiGood else TextSecondary,
+                    fontWeight = FontWeight.Medium
+                )
+
+                // Slider chu kỳ
+                val intervalLabels = listOf("Tắt tự động", "1 ngày", "2 ngày", "3 ngày", "7 ngày")
+                val intervalValues = listOf(0, 1, 2, 3, 7)
+                val currentIndex = intervalValues.indexOf(autoUpdateIntervalDays).coerceAtLeast(0)
+
+                Text(
+                    text = "Chu kỳ: ${intervalLabels.getOrElse(currentIndex) { "1 ngày" }}",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Slider(
+                    value = currentIndex.toFloat(),
+                    onValueChange = { idx ->
+                        val days = intervalValues.getOrElse(idx.toInt()) { 1 }
+                        onAutoUpdateIntervalChange(days)
+                    },
+                    valueRange = 0f..(intervalValues.size - 1).toFloat(),
+                    steps = intervalValues.size - 2,
+                    enabled = !isAutoUpdating,
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                        inactiveTrackColor = Color(0x22FFFFFF)
+                    )
+                )
+                Text(
+                    text = "0 = tắt tự động • 1 ngày (khuyến nghị) • 7 ngày (tiết kiệm data)",
+                    fontSize = 11.sp,
+                    color = TextSecondary
+                )
+
+                // Nút cập nhật ngay
+                Button(
+                    onClick = onTriggerManualUpdate,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = sharedWifiEnabled && sharedWifiOfflineEnabled && !isAutoUpdating && !sharedWifiPrefetching
+                ) {
+                    if (isAutoUpdating) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("Đang cập nhật dữ liệu offline...")
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.CloudDownload,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Cập nhật ngay")
+                    }
+                }
+
+                if (!sharedWifiEnabled || !sharedWifiOfflineEnabled) {
+                    Text(
+                        text = "Cần bật 'API WiFi chia sẻ' và 'Lưu offline' ở phần trên để sử dụng tính năng này.",
+                        fontSize = 11.sp,
+                        color = WifiWeak,
+                        lineHeight = 15.sp
+                    )
+                }
             }
         }
 

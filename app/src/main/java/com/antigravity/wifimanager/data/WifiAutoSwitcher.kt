@@ -30,6 +30,7 @@ class WifiAutoSwitcher(private val repository: WifiRepository) {
 
     suspend fun attemptSwitch(
         currentState: WifiConnectionState,
+        cachedScanResults: List<WifiApInfo>? = null,
         enforceCooldown: Boolean = true,
         onNotifyUser: ((WifiConnectionState, WifiApInfo) -> Unit)? = null
     ): SwitchAttemptResult {
@@ -50,7 +51,10 @@ class WifiAutoSwitcher(private val repository: WifiRepository) {
             repository.syncPasswordsFromSystem(forceRefresh = false)
         }
 
-        val scanResults = repository.scanNearbyNetworks(forceRefresh = enforceCooldown)
+        // Dùng cache được truyền vào nếu có — không scan thêm để tránh double-scan
+        val scanResults = cachedScanResults?.takeIf { it.isNotEmpty() }
+            ?: repository.scanNearbyNetworks(forceRefresh = false)
+
         val currentAp = findCurrentAp(scanResults, currentState)
         val on24Ghz = isCurrentlyOn24Ghz(currentState, currentAp)
 

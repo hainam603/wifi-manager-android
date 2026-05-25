@@ -37,9 +37,9 @@ class WifiMonitorService : Service() {
     companion object {
         const val ACTION_STOP = "STOP_SERVICE"
         const val ACTION_SCAN_NOW = "SCAN_NOW"
-        private const val PERIODIC_CHECK_INTERVAL_MS = 45_000L
-        private const val STATE_DEBOUNCE_MS = 12_000L
-        private const val NOTIFICATION_MIN_INTERVAL_MS = 45_000L
+        private const val PERIODIC_CHECK_INTERVAL_MS = 20_000L   // giảm từ 45s → 20s
+        private const val STATE_DEBOUNCE_MS = 5_000L              // giảm từ 12s → 5s
+        private const val NOTIFICATION_MIN_INTERVAL_MS = 30_000L
         private const val SIGNAL_NOTIFY_DELTA = 5
     }
 
@@ -60,6 +60,8 @@ class WifiMonitorService : Service() {
     private var lastNotificationMs = 0L
     private var lastNotifiedSignal = -1
     private var lastNotifiedSsid = ""
+    private var lastNotifiedConnected = false
+    private var pendingNotificationJob: Job? = null
 
     /** v2: IMPORTANCE_LOW để hiện icon trên thanh trạng thái (v1 dùng MIN — gần như ẩn). */
     private val channelId = "wifi_monitor_channel_v2"
@@ -72,11 +74,21 @@ class WifiMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
-    // Chỉ lắng NETWORK_STATE_CHANGED — RSSI_CHANGED bắn quá dày, tốn pin
+    /**
+     * Receiver lắng nghe 2 sự kiện:
+     * - SCAN_RESULTS_AVAILABLE_ACTION: OS vừa hoàn thành quét WiFi → cập nhật cache + kiểm tra auto-switch ngay
+     * - NETWORK_STATE_CHANGED_ACTION: trạng thái kết nối thay đổi → cập nhật connection state
+     */
     private val wifiReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == WifiManager.NETWORK_STATE_CHANGED_ACTION) {
-                updateConnectionState(force = true)
+            when (intent?.action) {
+                WifiManager.SCAN_RESULTS_AVAILABLE_ACTION -> {
+                    // OS vừa có kết quả scan mới — cập nhật ngay, không chờ
+                    onNewScanResultsAvailable()
+                }
+                WifiManager.NETWORK_STATE_CHANGED_ACTION -> {
+                    updateConnectionState(force = true)
+                }
             }
         }
     }
@@ -100,7 +112,10 @@ class WifiMonitorService : Service() {
             return
         }
 
-        val filter = IntentFilter(WifiManager.NETWORK_STATE_CHANGED_ACTION)
+        val filter = IntentFilter().apply {
+            addAction(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)  // realtime scan results
+            addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)   // connection state changes
+        }
         ContextCompat.registerReceiver(
             this,
             wifiReceiver,
@@ -113,12 +128,48 @@ class WifiMonitorService : Service() {
         startPeriodicMonitor()
     }
 
+    /**
+     * Được gọi mỗi khi OS broadcast SCAN_RESULTS_AVAILABLE_ACTION.
+     * Cập nhật cached scan + kiểm tra điều kiện auto-switch ngay lập tức.
+     */
+    private fun onNewScanResultsAvailable() {
+        serviceScope.launch {
+            // Đọc kết quả scan mới từ OS vào cache của repository (không block)
+            val freshScan = repository.scanNearbyNetworks(forceRefresh = false)
+
+            val state = repository.getCurrentConnectionState()
+            _connectionState.value = state
+
+            val now = System.currentTimeMillis()
+            maybeUpdateNotification(state, now, force = false)
+
+            // Kiểm tra và thực hiện auto-switch nếu đủ điều kiện
+            if (state.isConnected && repository.isAutoSwitchEnabled() && !switchInProgress) {
+                val threshold = repository.getThreshold()
+                val signalWeak = state.signalPercent < threshold
+                val shouldPrefer5G = repository.isPrefer5GhzEnabled() && !signalWeak
+                if (signalWeak || shouldPrefer5G) {
+                    evaluateAndSwitch(state, freshScan, fiveGhzUpgradeOnly = shouldPrefer5G && !signalWeak)
+                }
+            }
+        }
+    }
+
     private fun startPeriodicMonitor() {
         periodicJob?.cancel()
         periodicJob = serviceScope.launch {
             while (isActive) {
                 delay(PERIODIC_CHECK_INTERVAL_MS)
-                updateConnectionState(force = true)
+                // Yêu cầu OS làm mới danh sách WiFi — kết quả sẽ đến qua SCAN_RESULTS_AVAILABLE_ACTION
+                // Đây là fire-and-forget: không chờ kết quả, không block
+                @Suppress("DEPRECATION")
+                try {
+                    val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                    wm.startScan()
+                } catch (_: Exception) {}
+
+                // Cập nhật trạng thái kết nối độc lập (không phụ thuộc scan)
+                updateConnectionState(force = false)
             }
         }
     }
@@ -132,6 +183,7 @@ class WifiMonitorService : Service() {
             }
             ACTION_SCAN_NOW -> {
                 serviceScope.launch {
+                    // Trigger scan mới, đọc ngay kết quả hiện tại + cập nhật cache
                     repository.scanNearbyNetworks(forceRefresh = true)
                     updateConnectionState(force = true)
                 }
@@ -155,7 +207,9 @@ class WifiMonitorService : Service() {
             val signalWeak = state.signalPercent < threshold
             val shouldPrefer5G = repository.isPrefer5GhzEnabled() && signalWeak.not()
             if (signalWeak || shouldPrefer5G) {
-                evaluateAndSwitch(state, fiveGhzUpgradeOnly = shouldPrefer5G && !signalWeak)
+                // Dùng cache scan có sẵn thay vì scan mới (tránh double-scan)
+                val cachedScan = repository.getCachedScanResults()
+                evaluateAndSwitch(state, cachedScan, fiveGhzUpgradeOnly = shouldPrefer5G && !signalWeak)
             }
         }
     }
@@ -163,16 +217,40 @@ class WifiMonitorService : Service() {
     private fun maybeUpdateNotification(state: WifiConnectionState, now: Long, force: Boolean) {
         val signalDelta = kotlin.math.abs(state.signalPercent - lastNotifiedSignal)
         val ssidChanged = state.ssid != lastNotifiedSsid
-        val shouldUpdate = force ||
-            now - lastNotificationMs >= NOTIFICATION_MIN_INTERVAL_MS ||
-            signalDelta >= SIGNAL_NOTIFY_DELTA ||
-            ssidChanged
+        val connectionChanged = state.isConnected != lastNotifiedConnected
+        val isImportantChange = ssidChanged || connectionChanged
+
+        val shouldUpdate = isImportantChange || force ||
+            (now - lastNotificationMs >= NOTIFICATION_MIN_INTERVAL_MS) ||
+            (signalDelta >= SIGNAL_NOTIFY_DELTA && now - lastNotificationMs >= 5000L)
 
         if (!shouldUpdate) return
 
+        // Hủy bất kỳ tác vụ cập nhật thông báo đang chờ nào
+        pendingNotificationJob?.cancel()
+
+        val timeSinceLastMs = now - lastNotificationMs
+        val minIntervalMs = 1500L
+
+        if (timeSinceLastMs >= minIntervalMs) {
+            // Đã qua thời gian cooldown, cập nhật thông báo ngay lập tức
+            performNotificationUpdate(state, now)
+        } else {
+            // Trong thời gian cooldown, hoãn tác vụ cập nhật để tránh spam/rate limit
+            val delayMs = minIntervalMs - timeSinceLastMs
+            pendingNotificationJob = serviceScope.launch {
+                delay(delayMs)
+                val currentState = repository.getCurrentConnectionState()
+                performNotificationUpdate(currentState, System.currentTimeMillis())
+            }
+        }
+    }
+
+    private fun performNotificationUpdate(state: WifiConnectionState, now: Long) {
         lastNotificationMs = now
         lastNotifiedSignal = state.signalPercent
         lastNotifiedSsid = state.ssid
+        lastNotifiedConnected = state.isConnected
 
         val contentText = if (state.isConnected) {
             "Đang kết nối: ${state.ssid} (${state.signalPercent}%)"
@@ -180,25 +258,35 @@ class WifiMonitorService : Service() {
             "Ngoại tuyến - Chưa kết nối WiFi"
         }
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(
-            notificationId,
-            buildNotification(contentText, state.signalPercent)
-        )
+        try {
+            notificationManager.notify(
+                notificationId,
+                buildNotification(contentText, state.signalPercent)
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("WifiMonitorService", "Error posting notification", e)
+        }
     }
 
-    private fun evaluateAndSwitch(currentState: WifiConnectionState, fiveGhzUpgradeOnly: Boolean = false) {
+    /**
+     * Kiểm tra và thực hiện chuyển WiFi dùng cachedScan sẵn có.
+     * Không gọi scanNearbyNetworks thêm — tránh double-scan làm chậm.
+     */
+    private fun evaluateAndSwitch(
+        currentState: WifiConnectionState,
+        cachedScan: List<WifiApInfo>,
+        fiveGhzUpgradeOnly: Boolean = false
+    ) {
         if (switchInProgress) return
         switchInProgress = true
         serviceScope.launch {
             try {
-                if (fiveGhzUpgradeOnly) {
-                    val scan = repository.scanNearbyNetworks(forceRefresh = false)
-                    if (!autoSwitcher.canUpgradeTo5Ghz(currentState, scan)) {
-                        return@launch
-                    }
+                if (fiveGhzUpgradeOnly && !autoSwitcher.canUpgradeTo5Ghz(currentState, cachedScan)) {
+                    return@launch
                 }
                 autoSwitcher.attemptSwitch(
                     currentState = currentState,
+                    cachedScanResults = cachedScan,
                     enforceCooldown = true,
                     onNotifyUser = { from, target ->
                         if (!repository.isRootAvailable()) {
@@ -312,3 +400,4 @@ class WifiMonitorService : Service() {
         super.onDestroy()
     }
 }
+
