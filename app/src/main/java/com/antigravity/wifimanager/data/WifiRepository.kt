@@ -686,8 +686,13 @@ class WifiRepository(private val context: Context) {
 
     fun getSharedWifiOfflineMaxNetworks(): Int = sharedWifiRepository.getOfflineMaxNetworks()
 
-    suspend fun prefetchSharedWifiArea(onProgress: suspend (Int, Int) -> Unit = { _, _ -> }) =
-        sharedWifiRepository.prefetchArea(onProgress)
+    suspend fun prefetchSharedWifiArea(onProgress: suspend (Int, Int) -> Unit = { _, _ -> }): SharedWifiPrefetchResult {
+        val result = sharedWifiRepository.prefetchArea(onProgress)
+        if (result.success) {
+            setLastAutoUpdateMs(System.currentTimeMillis())
+        }
+        return result
+    }
 
     suspend fun lookupPasswordByWifiMasterId(wifiMasterId: Long): WifiIdLookupResult =
         sharedWifiRepository.lookupByWifiMasterId(wifiMasterId)
@@ -1627,6 +1632,46 @@ class WifiRepository(private val context: Context) {
             ?.takeIf { WifiCredentialKeys.isPlausibleWifiPassword(it, bssid) }
             ?.let { return it }
         return null
+    }
+
+    /**
+     * Resolve mật khẩu để HIỂN THỊ (UI):
+     * - Ưu tiên mật khẩu user đã lưu trong app (kể cả dạng key SSID|BSSID)
+     * - Sau đó mật khẩu "mạng tương tự" đã lưu trong app
+     * - Cuối cùng là mật khẩu từ offline store WiFi cộng đồng
+     *
+     * Khác với resolveConnectionPassword(): hàm này KHÔNG lọc rejected/plausible để tránh "có mà không show".
+     * (Logic kết nối vẫn dùng resolveConnectionPassword()).
+     */
+    fun resolvePasswordForDisplay(ssid: String, bssid: String? = null): String? {
+        if (ssid.isBlank()) return null
+
+        // 1) Password user lưu trong app (không filter plausible)
+        val saved = getSavedWifiPasswordUnsafe(ssid, bssid)?.trim().orEmpty()
+        if (saved.isNotEmpty()) return saved
+
+        // 2) Password từ mạng tương tự (đã lưu trong app)
+        val similar = getSimilarSsidWithSavedPassword(ssid)?.second?.trim().orEmpty()
+        if (similar.isNotEmpty()) return similar
+
+        // 3) Password từ offline store WiFi cộng đồng (không filter rejected)
+        val shared = sharedWifiRepository.getSharedPassword(ssid, bssid)?.trim().orEmpty()
+        if (shared.isNotEmpty()) return shared
+
+        return null
+    }
+
+    private fun getSavedWifiPasswordUnsafe(ssid: String, bssid: String? = null): String? {
+        val passwords = getSavedWifiPasswords()
+        if (WifiCredentialKeys.isValidBssid(bssid)) {
+            passwords[WifiCredentialKeys.storageKey(ssid, bssid)]?.let { return it }
+        }
+        passwords[ssid]?.let { return it }
+        return passwords.entries.firstOrNull { (key, _) ->
+            val (storedSsid, storedBssid) = WifiCredentialKeys.parseStorageKey(key)
+            storedSsid.equals(ssid, ignoreCase = true) &&
+                (WifiCredentialKeys.normalizeBssid(storedBssid).isEmpty() || !WifiCredentialKeys.isValidBssid(bssid))
+        }?.value
     }
 
     private fun securityTypesFromHint(securityHint: String?): List<String> {

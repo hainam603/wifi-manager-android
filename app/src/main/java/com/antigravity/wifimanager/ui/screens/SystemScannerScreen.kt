@@ -41,7 +41,7 @@ data class SystemScannerRowModel(
     val isConnected: Boolean
 ) {
     val stableKey: String
-        get() = "${ap.ssid.lowercase(Locale.getDefault())}|${ap.bssid.lowercase(Locale.getDefault())}"
+        get() = ap.ssid.lowercase(Locale.getDefault())
 }
 
 @Composable
@@ -305,7 +305,6 @@ fun SystemScannerScreen(
                     Text(
                         text = when {
                             !savedPassword.isNullOrEmpty() -> "Mật khẩu WiFi"
-                            hasSystemCredential -> "Đã lưu trong hệ thống"
                             else -> "Kết nối vào mạng"
                         }
                     )
@@ -320,13 +319,6 @@ fun SystemScannerScreen(
                             label = { Text("Mật khẩu") },
                             singleLine = true
                         )
-                        if (savedPassword.isNullOrEmpty() && hasSystemCredential) {
-                            Text(
-                                text = "Mạng này đã được lưu trong hệ thống Android. Nhấn kết nối hoặc nhập mật khẩu để đồng bộ trực tiếp với app.",
-                                fontSize = 12.sp,
-                                color = TextSecondary
-                            )
-                        }
                     }
                 },
                 confirmButton = {
@@ -501,13 +493,6 @@ private fun SystemWifiApRow(
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = WifiWeak
-                        )
-                    } else if (ap.isSaved) {
-                        Text(
-                            text = "Đã lưu trong máy",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = WifiGood
                         )
                     }
                 }

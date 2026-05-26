@@ -17,7 +17,7 @@ data class ScannerApRowModel(
     val similarPassword: String?
 ) {
     val stableKey: String
-        get() = "${ap.ssid.lowercase(Locale.getDefault())}|${ap.bssid.lowercase(Locale.getDefault())}"
+        get() = ap.ssid.lowercase(Locale.getDefault())
 }
 
 @Immutable
@@ -65,6 +65,15 @@ object ScannerUiMapper {
         val connectedSsid = resolveConnectedSsid(connection)
         val connectedAp = resolveConnectedAp(networks, connection, connectedSsid)
 
+        fun pickBestPerSsid(input: List<WifiApInfo>): List<WifiApInfo> {
+            if (input.isEmpty()) return emptyList()
+            return input
+                .filter { it.ssid.isNotBlank() }
+                .groupBy { it.ssid.lowercase(Locale.getDefault()) }
+                .values
+                .mapNotNull { group -> group.maxWithOrNull(wifiApComparator) }
+        }
+
         fun rowModel(ap: WifiApInfo, isNearbyGroup: Boolean): ScannerApRowModel {
             val needsPassword = ap.securityType.contains("WPA", ignoreCase = true) ||
                 ap.securityType.contains("SAE", ignoreCase = true) ||
@@ -89,17 +98,15 @@ object ScannerUiMapper {
             )
         }
 
-        val savedRows = networks
+        val savedRows = pickBestPerSsid(networks)
             .filter { it.ssid != connectedSsid && it.isSaved }
             .sortedWith(wifiApComparator)
             .map { rowModel(it, isNearbyGroup = false) }
-            .filter { it.passwordDisplay != null }
 
-        val nearbyRows = networks
+        val nearbyRows = pickBestPerSsid(networks)
             .filter { it.ssid != connectedSsid && !it.isSaved }
             .sortedWith(wifiApComparator)
             .map { rowModel(it, isNearbyGroup = true) }
-            .filter { it.passwordDisplay != null }
 
         val connectedRow = connectedAp?.let { rowModel(it, isNearbyGroup = false) }
 
@@ -189,10 +196,6 @@ object ScannerUiMapper {
             }
         }
 
-        return when {
-            hasSystemCredential && (isNearbyGroup && ap.isReadyToConnect || !isNearbyGroup) ->
-                "(đã lưu trong hệ thống)"
-            else -> null
-        }
+        return null
     }
 }

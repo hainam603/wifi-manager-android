@@ -281,7 +281,7 @@ class MainActivity : ComponentActivity() {
                     networks = scannedList,
                     connection = snapshot,
                     resolvePassword = { ssid, bssid ->
-                        repository.resolveConnectionPassword(ssid, bssid = bssid)
+                        repository.resolvePasswordForDisplay(ssid, bssid = bssid)
                     },
                     resolveSimilarPassword = { ssid ->
                         repository.getSimilarSsidWithSavedPassword(ssid)
@@ -300,8 +300,21 @@ class MainActivity : ComponentActivity() {
             val snapshot = connectionState
             val rawList = systemScannedList
             systemScannerRows = withContext(Dispatchers.IO) {
-                rawList.map { ap ->
-                    val savedPassword = repository.resolveConnectionPassword(ap.ssid, bssid = ap.bssid)
+                val grouped = rawList
+                    .filter { it.ssid.isNotBlank() }
+                    .groupBy { it.ssid.lowercase(Locale.getDefault()) }
+                    .values
+                    .mapNotNull { group ->
+                        group.maxWithOrNull(
+                            compareByDescending<WifiApInfo> { it.signalPercent }
+                                .thenByDescending { it.is5GHz }
+                                .thenByDescending { it.frequencyMhz }
+                                .thenBy { it.ssid.lowercase(Locale.getDefault()) }
+                        )
+                    }
+
+                grouped.map { ap ->
+                    val savedPassword = repository.resolvePasswordForDisplay(ap.ssid, bssid = ap.bssid)
                     val hasCred = repository.hasStoredCredential(ap.ssid)
                     val isConnected = snapshot.isConnected && repository.ssidsMatch(snapshot.ssid, ap.ssid)
                     SystemScannerRowModel(
@@ -793,7 +806,7 @@ class MainActivity : ComponentActivity() {
 
 
                         onResolvePassword = { ssid, bssid ->
-                            repository.resolveConnectionPassword(ssid, bssid = bssid)
+                            repository.resolvePasswordForDisplay(ssid, bssid = bssid)
                         },
                         onRefreshPasswordForBssid = { ssid, bssid ->
                             val key = "${ssid.lowercase()}|${bssid.lowercase()}"

@@ -127,7 +127,7 @@ fun ScannerScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Tìm thấy ${effectiveDisplayState.totalRowCount()} mạng WiFi có mật khẩu",
+                text = "Tìm thấy ${effectiveDisplayState.totalRowCount()} mạng WiFi",
                 fontSize = 13.sp,
                 color = TextSecondary
             )
@@ -271,7 +271,6 @@ fun ScannerScreen(
                     Text(
                         text = when {
                             !savedPassword.isNullOrEmpty() -> "Mật khẩu WiFi"
-                            hasSystemCredential -> "Đã lưu trong hệ thống"
                             else -> "Lưu mật khẩu WiFi"
                         }
                     )
@@ -293,13 +292,6 @@ fun ScannerScreen(
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                        if (savedPassword.isNullOrEmpty() && hasSystemCredential) {
-                            Text(
-                                text = "Mạng này đã có thông tin đăng nhập trong hệ thống. Bạn có thể lưu mật khẩu thủ công để app dùng trực tiếp.",
-                                fontSize = 12.sp,
-                                color = TextSecondary
                             )
                         }
                     }
@@ -426,7 +418,7 @@ private fun ScannerNetworkList(
         if (savedRows.isNotEmpty()) {
             item(key = "header_saved", contentType = "header") {
                 Text(
-                    text = "Mạng Wi-Fi đã lưu",
+                    text = "Mạng Wi-Fi",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextSecondary,
