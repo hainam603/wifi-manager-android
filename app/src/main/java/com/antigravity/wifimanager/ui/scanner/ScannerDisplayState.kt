@@ -62,10 +62,7 @@ object ScannerUiMapper {
         resolvePassword: (ssid: String, bssid: String?) -> String? = { _, _ -> null },
         resolveSimilarPassword: (ssid: String) -> Pair<String, String>? = { null }
     ): ScannerDisplayState {
-        val connectableNetworks = networks.filter { it.isScannerConnectable() }
         val connectedSsid = resolveConnectedSsid(connection)
-        val connectedAp = resolveConnectedAp(connectableNetworks, connection, connectedSsid)
-            ?: resolveConnectedAp(networks, connection, connectedSsid)
 
         fun pickBestPerSsid(input: List<WifiApInfo>): List<WifiApInfo> {
             if (input.isEmpty()) return emptyList()
@@ -75,6 +72,21 @@ object ScannerUiMapper {
                 .values
                 .mapNotNull { group -> group.maxWithOrNull(wifiApComparator) }
         }
+
+        val rawConnectable = networks.filter { it.isScannerConnectable() }
+        val rawNonConnectable = networks.filter { !it.isScannerConnectable() }
+
+        val bestConnectable = pickBestPerSsid(rawConnectable).filter { it.ssid != connectedSsid }
+        
+        val connectableSsids = bestConnectable.map { it.ssid.lowercase(Locale.getDefault()) }.toSet()
+        val connectedSsidLower = connectedSsid?.lowercase(Locale.getDefault())
+        val bestNonConnectable = pickBestPerSsid(rawNonConnectable)
+            .filter { ap ->
+                val lowerSsid = ap.ssid.lowercase(Locale.getDefault())
+                lowerSsid != connectedSsidLower && !connectableSsids.contains(lowerSsid)
+            }
+
+        val connectedAp = resolveConnectedAp(networks, connection, connectedSsid)
 
         fun rowModel(ap: WifiApInfo, isNearbyGroup: Boolean): ScannerApRowModel {
             val needsPassword = ap.securityType.contains("WPA", ignoreCase = true) ||
@@ -100,12 +112,13 @@ object ScannerUiMapper {
             )
         }
 
-        val savedRows = pickBestPerSsid(connectableNetworks)
-            .filter { it.ssid != connectedSsid }
+        val savedRows = bestConnectable
             .sortedWith(wifiApComparator)
             .map { rowModel(it, isNearbyGroup = false) }
 
-        val nearbyRows = emptyList<ScannerApRowModel>()
+        val nearbyRows = bestNonConnectable
+            .sortedWith(wifiApComparator)
+            .map { rowModel(it, isNearbyGroup = true) }
 
         val connectedRow = connectedAp?.let { rowModel(it, isNearbyGroup = false) }
 

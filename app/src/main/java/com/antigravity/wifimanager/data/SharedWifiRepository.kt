@@ -556,6 +556,10 @@ class SharedWifiRepository(private val context: Context) {
             ?.takeUnless { password -> isPasswordRejected(ssid, bssid, password) }
     }
 
+    fun loadAllOfflineCredentials(): List<SharedWifiCredential> {
+        return offlineStore.loadAll()
+    }
+
     private fun isNetworkAvailable(): Boolean {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val network = cm.activeNetwork ?: return false

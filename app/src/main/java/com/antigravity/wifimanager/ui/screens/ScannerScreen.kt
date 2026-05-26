@@ -1,7 +1,10 @@
 package com.antigravity.wifimanager.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -94,13 +97,21 @@ fun ScannerScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = {
-                    if (isScanning || connectingApKey != null) return@FloatingActionButton
-                    onRefreshScan()
-                },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = Color.White
+            // Nút Quét Lại phong cách Gradient Cyberpunk phát sáng mượt mà
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.horizontalGradient(
+                            colors = listOf(CyberPurple, CyberCyan)
+                        )
+                    )
+                    .clickable {
+                        if (isScanning || connectingApKey != null) return@clickable
+                        onRefreshScan()
+                    },
+                contentAlignment = Alignment.Center
             ) {
                 if (isScanning) {
                     CircularProgressIndicator(
@@ -109,7 +120,12 @@ fun ScannerScreen(
                         strokeWidth = 2.dp
                     )
                 } else {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Quét lại")
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Quét lại",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
         },
@@ -119,26 +135,53 @@ fun ScannerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .padding(horizontal = 24.dp, vertical = 16.dp)
+                .padding(horizontal = 20.dp, vertical = 16.dp)
         ) {
             Text(
                 text = "Mạng khả dụng",
                 fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Black,
+                color = TextPrimary,
+                letterSpacing = (-0.5).sp
             )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                val connectableCount = (if (effectiveDisplayState.connectedRow != null) 1 else 0) +
+                    effectiveDisplayState.savedRows.size
+                Text(
+                    text = "Có thể kết nối: $connectableCount/${effectiveDisplayState.totalRowCount()} mạng",
+                    fontSize = 12.sp,
+                    color = TextSecondary
+                )
+                Text(
+                    text = "•",
+                    fontSize = 12.sp,
+                    color = TextSecondary
+                )
+                Text(
+                    text = when {
+                        isScanning -> "Đang phân tích..."
+                        isRealtimeScanning -> "Quét thời gian thực"
+                        else -> "Đứng yên"
+                    },
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isRealtimeScanning && !isScanning) CyberEmerald else TextSecondary,
+                    modifier = Modifier
+                        .background(
+                            if (isRealtimeScanning && !isScanning) Color(0x1A10B981) else Color(0x0CFFFFFF),
+                            RoundedCornerShape(4.dp)
+                        )
+                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                )
+            }
             Text(
-                text = "Có thể kết nối: ${effectiveDisplayState.totalRowCount()} mạng",
-                fontSize = 13.sp,
-                color = TextSecondary
-            )
-            Text(
-                text = when {
-                    isScanning -> "Đang quét WiFi và tải dữ liệu cộng đồng..."
-                    isRealtimeScanning -> "Đang quét realtime · $scanStatusText"
-                    else -> scanStatusText
-                },
-                fontSize = 12.sp,
-                color = if (isRealtimeScanning && !isScanning) WifiGood else TextSecondary
+                text = scanStatusText,
+                fontSize = 11.sp,
+                color = TextSecondary,
+                modifier = Modifier.padding(top = 2.dp)
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -146,13 +189,14 @@ fun ScannerScreen(
             if (!rootConnectAvailable) {
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
-                    containerColor = Color(0x33F59E0B)
+                    containerColor = Color(0x1AEF4444),
+                    leftIndicatorColor = CyberRose
                 ) {
                     Text(
-                        text = "Chưa có quyền Root — không thể kết nối im lặng. Vào Cấu hình → Yêu cầu Root. Vẫn có thể xem/sửa mật khẩu (icon bút).",
-                        modifier = Modifier.padding(12.dp),
+                        text = "Chưa có quyền Root — không thể tự kết nối mạng im lặng. Hãy cấp Root tại Cấu hình hoặc dùng kết nối thủ công bằng cách sao chép mật khẩu (icon bút).",
+                        modifier = Modifier.padding(start = 22.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
                         fontSize = 12.sp,
-                        color = Color(0xFFFDE68A),
+                        color = Color(0xFFFECACA),
                         lineHeight = 18.sp
                     )
                 }
@@ -172,7 +216,8 @@ fun ScannerScreen(
                     ) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(36.dp),
-                            strokeWidth = 3.dp
+                            strokeWidth = 3.dp,
+                            color = CyberCyan
                         )
                         Text(
                             text = "Đang quét WiFi và tải dữ liệu cộng đồng...",
@@ -190,12 +235,19 @@ fun ScannerScreen(
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = TextSecondary,
+                            modifier = Modifier.size(48.dp)
+                        )
                         Text(
-                            text = "Không có mạng WiFi nào có thể kết nối",
+                            text = "Không tìm thấy mạng WiFi phù hợp lân cận",
                             color = TextSecondary,
-                            fontSize = 14.sp
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
                         )
                     }
                 }
@@ -212,10 +264,11 @@ fun ScannerScreen(
                     ) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(36.dp),
-                            strokeWidth = 3.dp
+                            strokeWidth = 3.dp,
+                            color = CyberPurple
                         )
                         Text(
-                            text = "Đang chuẩn bị danh sách $networkCount mạng...",
+                            text = "Đang xử lý $networkCount mạng...",
                             color = TextSecondary,
                             fontSize = 14.sp
                         )
@@ -243,82 +296,86 @@ fun ScannerScreen(
                         passwordInput = initial
                     }
                 )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Đang tải giao diện...",
-                        color = TextSecondary,
-                        fontSize = 14.sp
-                    )
-                }
             }
         }
 
+        // Hộp thoại nhập mật khẩu phong cách Sci-Fi Glass Dialog cực kỳ cao cấp
         if (passwordDialogSsid != null) {
             val activeSsid = passwordDialogSsid!!
             val activeBssid = passwordDialogBssid
             val savedPassword = onGetSavedPassword(activeSsid, activeBssid)
             val isCurrentlyConnected = connectionState.isConnected && 
-                connectionState.ssid.equals(activeSsid, ignoreCase = true)
+                connectionState.ssid.replace("\"", "").lowercase().trim() == activeSsid.replace("\"", "").lowercase().trim()
             val hasSystemCredential = onHasSystemCredential(activeSsid) || isCurrentlyConnected
-
-
 
             AlertDialog(
                 onDismissRequest = { passwordDialogSsid = null },
+                shape = RoundedCornerShape(24.dp),
+                containerColor = CosmicBgStart, // Đảm bảo nền tối độ tương phản cao dễ đọc
+                modifier = Modifier.border(1.dp, Color(0x18FFFFFF), RoundedCornerShape(24.dp)),
                 title = {
                     Text(
-                        text = when {
-                            !savedPassword.isNullOrEmpty() -> "Mật khẩu WiFi"
-                            else -> "Lưu mật khẩu WiFi"
-                        }
+                        text = if (!savedPassword.isNullOrEmpty()) "Mật khẩu mạng đã lưu" else "Cấu hình mật khẩu WiFi",
+                        fontWeight = FontWeight.Black,
+                        color = TextPrimary
                     )
                 },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(text = activeSsid)
+                        Text(
+                            text = activeSsid.replace("\"", ""),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            color = CyberCyan
+                        )
                         if (!rootConnectAvailable) {
                             Text(
-                                text = "Cần quyền Root để kết nối — mật khẩu chỉ được lưu sau khi kết nối thành công.",
-                                fontSize = 12.sp,
-                                color = WifiWeak,
+                                text = "Thiết bị chưa Root — mật khẩu sẽ chỉ lưu cục bộ trong ứng dụng này. Để kết nối thật, hãy sao chép rồi dán vào cài đặt WiFi hệ thống.",
+                                fontSize = 11.sp,
+                                color = CyberAmber,
                                 lineHeight = 16.sp
                             )
                         }
+                        
                         OutlinedTextField(
                             value = passwordInput,
                             onValueChange = { passwordInput = it },
                             modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Mật khẩu") },
-                            singleLine = true
+                            label = { Text("Mật khẩu kết nối") },
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = CyberCyan,
+                                focusedLabelColor = CyberCyan,
+                                unfocusedBorderColor = Color(0x33FFFFFF),
+                                unfocusedLabelColor = TextSecondary,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            )
                         )
+                        
                         val similarSsid = passwordDialogSimilarSsid
                         if (savedPassword.isNullOrEmpty() && !similarSsid.isNullOrBlank()) {
                             Text(
-                                text = "✨ Phát hiện mật khẩu từ mạng tương tự: '$similarSsid'",
+                                text = "✨ Gợi ý mật khẩu từ SSID tương tự: '$similarSsid'",
                                 fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.SemiBold
+                                color = CyberPurple,
+                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
                 },
                 confirmButton = {
-                    TextButton(
-                        enabled = connectingApKey == null && !isPasswordBusy && rootConnectAvailable,
+                    Button(
+                        enabled = connectingApKey == null && !isPasswordBusy,
+                        colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
                         onClick = {
                             if (!rootConnectAvailable) {
-                                coroutineScope.launch {
-                                    snackbarHostState.showSnackbar(
-                                        "Cần Root để kết nối — mật khẩu chỉ lưu khi kết nối thành công."
-                                    )
-                                }
-                                return@TextButton
+                                // Nếu không có Root, ta cho phép lưu mật khẩu vào DB cục bộ
+                                onRemovePassword(activeSsid, activeBssid) // Reset
+                                onConnectNetwork(activeSsid, activeBssid ?: "02:00:00:00:00:00", passwordInput) // Lưu
+                                passwordDialogSsid = null
+                                passwordDialogBssid = null
+                                return@Button
                             }
                             onConnectNetwork(
                                 activeSsid,
@@ -330,15 +387,21 @@ fun ScannerScreen(
                         }
                     ) {
                         Text(
-                            when {
+                            text = when {
+                                !rootConnectAvailable -> "Lưu mật khẩu"
                                 savedPassword.isNullOrEmpty() -> "Kết nối"
                                 else -> "Cập nhật & kết nối"
-                            }
+                            },
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Black
                         )
                     }
                 },
                 dismissButton = {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         if (!savedPassword.isNullOrEmpty() || hasSystemCredential) {
                             TextButton(
                                 onClick = {
@@ -349,12 +412,12 @@ fun ScannerScreen(
                                     }
                                 }
                             ) {
-                                Text("Xóa mạng")
+                                Text("Quên mạng", color = CyberRose, fontWeight = FontWeight.Bold)
                             }
                         }
 
                         TextButton(onClick = { passwordDialogSsid = null }) {
-                            Text("Đóng")
+                            Text("Đóng", color = TextSecondary)
                         }
                     }
                 }
@@ -396,11 +459,12 @@ private fun ScannerNetworkList(
         if (connectedRow != null) {
             item(key = "header_connected", contentType = "header") {
                 Text(
-                    text = "Đang kết nối",
-                    fontSize = 13.sp,
+                    text = "MẠNG ĐANG KẾT NỐI",
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(bottom = 6.dp, top = 4.dp)
+                    color = CyberCyan,
+                    letterSpacing = 1.sp,
+                    modifier = Modifier.padding(bottom = 4.dp, top = 4.dp)
                 )
             }
             item(key = "connected_${connectedRow.stableKey}", contentType = "connected") {
@@ -425,11 +489,12 @@ private fun ScannerNetworkList(
         if (savedRows.isNotEmpty()) {
             item(key = "header_saved", contentType = "header") {
                 Text(
-                    text = "Có thể kết nối",
-                    fontSize = 13.sp,
+                    text = "MẠNG SẴN SÀNG KẾT NỐI",
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextSecondary,
-                    modifier = Modifier.padding(bottom = 6.dp, top = 12.dp)
+                    letterSpacing = 1.sp,
+                    modifier = Modifier.padding(bottom = 4.dp, top = 12.dp)
                 )
             }
             items(
@@ -457,11 +522,12 @@ private fun ScannerNetworkList(
         if (nearbyRows.isNotEmpty()) {
             item(key = "header_nearby", contentType = "header") {
                 Text(
-                    text = "Chọn mạng Wi-Fi lân cận",
-                    fontSize = 13.sp,
+                    text = "MẠNG CHƯA CÓ MẬT KHẨU",
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextSecondary,
-                    modifier = Modifier.padding(bottom = 6.dp, top = 12.dp)
+                    letterSpacing = 1.sp,
+                    modifier = Modifier.padding(bottom = 4.dp, top = 12.dp)
                 )
             }
             items(
@@ -524,7 +590,7 @@ private fun ScannerApListItem(
         isConnectedState = isConnectedState,
         isConnecting = connectingApKey == apKey,
         connectFailed = isConnectFailed,
-        connectEnabled = rootConnectAvailable,
+        connectEnabled = true, // Cho phép bấm để nhập/sao chép kể cả khi chưa có Root
         connectBlocked = connectingApKey != null || refreshingPasswordApKey != null,
         passwordDisplay = row.passwordDisplay ?: row.savedPassword,
         showRefreshPasswordButton = canRefreshByBssid && !isConnectedState,
@@ -536,7 +602,21 @@ private fun ScannerApListItem(
             }
         },
         onConnectClick = {
-            if (connectingApKey != null || !rootConnectAvailable) return@WifiApRow
+            if (connectingApKey != null) return@WifiApRow
+            
+            // Trường hợp chưa Root, bấm vào card sẽ mở hộp thoại để người dùng xem/sửa/copy mật khẩu
+            if (!rootConnectAvailable) {
+                onOpenPasswordDialog(
+                    ap.ssid,
+                    ap.bssid,
+                    onResolvePassword(ap.ssid, ap.bssid)
+                        ?: ap.sharedPasswordFromApi
+                        ?: row.similarPassword.orEmpty(),
+                    row.similarSsid
+                )
+                return@WifiApRow
+            }
+
             if (ap.isSharedPasswordRejected) {
                 onOpenPasswordDialog(
                     ap.ssid,
@@ -593,37 +673,50 @@ private fun WifiApRow(
     onConnectClick: () -> Unit,
     onEditPasswordClick: () -> Unit
 ) {
-    val cardBg = if (isConnectedState) Color(0xFF3B82F6) else CardBackground
+    // Vạch màu đứng bên mép trái chỉ thị cường độ sóng hoặc kết nối tích cực
+    val leftIndicatorColor = when {
+        isConnectedState -> CyberCyan
+        ap.signalPercent >= 70 -> CyberEmerald
+        ap.signalPercent >= 45 -> CyberAmber
+        else -> CyberRose
+    }
+
+    val cardBg = if (isConnectedState) Color(0x1B06B6D4) else Color(0x0CFFFFFF)
     val cardBorderBrush = remember(isConnectedState) {
         if (isConnectedState) {
             Brush.verticalGradient(
-                colors = listOf(Color(0x8860A5FA), Color(0x223B82F6))
+                colors = listOf(Color(0x6606B6D4), Color(0x1106B6D4))
             )
         } else {
-            null
+            Brush.verticalGradient(
+                colors = listOf(Color(0x1FFFFFFF), Color(0x02FFFFFF))
+            )
         }
     }
 
-    val titleColor = if (isConnectedState) Color.White else TextPrimary
-    val subtitleColor = if (isConnectedState) Color(0xFFDBEAFE) else TextSecondary
+    val titleColor = if (isConnectedState) CyberCyan else TextPrimary
+    val subtitleColor = TextSecondary
+
     GlassCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(enabled = connectEnabled && !connectBlocked && !isConnecting) { onConnectClick() },
         containerColor = cardBg,
-        borderBrush = cardBorderBrush
+        borderBrush = cardBorderBrush,
+        leftIndicatorColor = leftIndicatorColor
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(start = 22.dp, end = 12.dp, top = 14.dp, bottom = 14.dp), // Chừa 22dp start để không chạm left indicator
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
+                // Hàng 1: SSID + Băng tần + Badge loại mạng
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.Top,
+                    verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
@@ -631,59 +724,99 @@ private fun WifiApRow(
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = titleColor,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 3
+                        modifier = Modifier.weight(1f, fill = false),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
+                    
                     WifiBandBadge(
                         is5GHz = ap.is5GHz,
                         highlighted = isConnectedState
                     )
+
+                    // Hiển thị badge "Đã lưu" hoặc "Cộng đồng"
+                    if (ap.isReadyToConnect || ap.isSaved) {
+                        Text(
+                            text = "Đã lưu",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = CyberEmerald,
+                            modifier = Modifier
+                                .background(Color(0x1A10B981), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    } else if (!ap.sharedProviderName.isNullOrBlank()) {
+                        Text(
+                            text = "Cộng đồng",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = CyberCyan,
+                            modifier = Modifier
+                                .background(Color(0x1A06B6D4), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                Text(
-                    text = "BSSID: ${ap.bssid}",
-                    fontSize = 11.sp,
-                    color = subtitleColor
-                )
-                Text(
-                    text = "Bảo mật: ${if (ap.securityType.contains("WPA", ignoreCase = true)) "WPA2/WPA3" else "Open"}",
-                    fontSize = 11.sp,
-                    color = subtitleColor
-                )
+                // Hàng 2: BSSID & Bảo mật
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "BSSID: ${ap.bssid}",
+                        fontSize = 11.sp,
+                        color = subtitleColor
+                    )
+                    Text(
+                        text = "•",
+                        fontSize = 11.sp,
+                        color = subtitleColor
+                    )
+                    Text(
+                        text = if (ap.securityType.contains("WPA", ignoreCase = true)) "WPA2/WPA3" else "Mở",
+                        fontSize = 11.sp,
+                        color = subtitleColor
+                    )
+                }
 
+                // Trạng thái kết nối / lỗi
                 if (isConnecting) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(top = 4.dp)
                     ) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(14.dp),
-                            color = if (isConnectedState) Color.White else MaterialTheme.colorScheme.primary,
-                            strokeWidth = 2.dp
+                            modifier = Modifier.size(12.dp),
+                            color = CyberCyan,
+                            strokeWidth = 1.5.dp
                         )
                         Text(
-                            text = "Đang kết nối...",
+                            text = "Đang liên kết mạng...",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (isConnectedState) Color(0xFFDBEAFE) else MaterialTheme.colorScheme.primary
+                            color = CyberCyan
                         )
                     }
                 } else if (isConnectedState) {
                     Text(
-                        text = "Đang kết nối",
+                        text = "Đang kết nối chủ động",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF86EFAC)
+                        color = CyberEmerald,
+                        modifier = Modifier.padding(top = 2.dp)
                     )
                 } else {
                     if (ap.isSharedPasswordRejected) {
                         Text(
-                            text = "Mật khẩu API không hợp lệ — chờ cập nhật",
+                            text = "Mật khẩu cộng đồng sai — bấm để sửa",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = WifiWeak
+                            color = CyberRose,
+                            modifier = Modifier.padding(top = 2.dp)
                         )
                         if (showRefreshPasswordButton) {
                             Spacer(modifier = Modifier.height(4.dp))
@@ -695,17 +828,18 @@ private fun WifiApRow(
                             ) {
                                 if (isRefreshingPassword) {
                                     CircularProgressIndicator(
-                                        modifier = Modifier.size(14.dp),
-                                        strokeWidth = 2.dp
+                                        modifier = Modifier.size(12.dp),
+                                        strokeWidth = 1.5.dp,
+                                        color = CyberCyan
                                     )
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
                                 } else {
                                     Icon(
                                         imageVector = Icons.Default.Refresh,
                                         contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
+                                        modifier = Modifier.size(14.dp)
                                     )
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
                                 }
                                 Text(
                                     text = if (isRefreshingPassword) "Đang cập nhật..." else "Cập nhật mật khẩu (BSSID)",
@@ -716,27 +850,31 @@ private fun WifiApRow(
                         }
                     } else if (connectFailed) {
                         Text(
-                            text = "Kết nối thất bại — thử lại hoặc sửa mật khẩu",
+                            text = "Kết nối thất bại — chạm để sửa mật khẩu",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = WifiWeak
+                            color = CyberRose,
+                            modifier = Modifier.padding(top = 2.dp)
                         )
                     } else if (ap.isReadyToConnect) {
                         Text(
-                            text = "Sẵn sàng kết nối",
+                            text = "Sẵn sàng kết nối tự động",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = WifiGood
+                            color = CyberEmerald,
+                            modifier = Modifier.padding(top = 2.dp)
                         )
                     }
                 }
 
+                // Hiển thị mật khẩu đã lưu/cộng đồng nếu có
                 if (!passwordDisplay.isNullOrBlank()) {
                     Text(
                         text = "Mật khẩu: $passwordDisplay",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (isConnectedState) Color(0xFF86EFAC) else Accent
+                        color = if (isConnectedState) CyberEmerald else CyberCyan,
+                        modifier = Modifier.padding(top = 2.dp)
                     )
                 }
 
@@ -749,10 +887,11 @@ private fun WifiApRow(
                     ) {
                         if (isRefreshingPassword) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(14.dp),
-                                strokeWidth = 2.dp
+                                modifier = Modifier.size(12.dp),
+                                strokeWidth = 1.5.dp,
+                                color = CyberCyan
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
                             Text("Đang cập nhật...", fontSize = 11.sp)
                         } else {
                             Text("Cập nhật mật khẩu (BSSID)", fontSize = 11.sp)
@@ -761,39 +900,44 @@ private fun WifiApRow(
                 }
             }
 
+            // Cột bên phải: % Sóng và Nút sửa mật khẩu
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
                     text = "${ap.signalPercent}%",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Black,
                     color = if (isConnectedState) {
                         Color.White
                     } else {
                         when {
-                            ap.signalPercent >= 70 -> WifiGood
-                            ap.signalPercent >= 45 -> WifiMedium
-                            else -> WifiWeak
+                            ap.signalPercent >= 70 -> CyberEmerald
+                            ap.signalPercent >= 45 -> CyberAmber
+                            else -> CyberRose
                         }
                     }
                 )
 
                 IconButton(
                     onClick = onEditPasswordClick,
-                    enabled = !isConnecting
+                    enabled = !isConnecting,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .background(Color(0x0AFFFFFF), CircleShape)
                 ) {
                     Icon(
                         imageVector = if (passwordDisplay.isNullOrBlank()) Icons.Default.VisibilityOff else Icons.Default.Edit,
-                        contentDescription = if (passwordDisplay.isNullOrBlank()) "Lưu mật khẩu" else "Sửa mật khẩu",
+                        contentDescription = "Sửa mật khẩu",
                         tint = if (isConnectedState) {
                             Color.White
                         } else if (!passwordDisplay.isNullOrBlank()) {
-                            MaterialTheme.colorScheme.primary
+                            CyberCyan
                         } else {
                             Color(0x33FFFFFF)
-                        }
+                        },
+                        modifier = Modifier.size(14.dp)
                     )
                 }
             }

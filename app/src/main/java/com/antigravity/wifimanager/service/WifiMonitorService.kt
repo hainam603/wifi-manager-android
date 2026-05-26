@@ -1,6 +1,8 @@
 package com.antigravity.wifimanager.service
 
 import android.app.Notification
+import android.util.Log
+import com.antigravity.wifimanager.data.CaptivePortalBypasser
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -53,6 +55,8 @@ class WifiMonitorService : Service() {
 
     private val binder = LocalBinder()
     private var isRegistered = false
+    private var lastBypassAttemptSsid = ""
+    private var lastBypassAttemptTimeMs = 0L
     private var periodicJob: Job? = null
     private var switchInProgress = false
 
@@ -143,6 +147,10 @@ class WifiMonitorService : Service() {
             val now = System.currentTimeMillis()
             maybeUpdateNotification(state, now, force = false)
 
+            if (state.isConnected) {
+                checkAndTriggerCaptivePortalBypass(state)
+            }
+
             // Kiểm tra và thực hiện auto-switch nếu đủ điều kiện
             if (state.isConnected && repository.isAutoSwitchEnabled() && !switchInProgress) {
                 val threshold = repository.getThreshold()
@@ -201,6 +209,10 @@ class WifiMonitorService : Service() {
         _connectionState.value = state
 
         maybeUpdateNotification(state, now, force)
+
+        if (state.isConnected) {
+            checkAndTriggerCaptivePortalBypass(state)
+        }
 
         if (state.isConnected && repository.isAutoSwitchEnabled() && !switchInProgress) {
             val threshold = repository.getThreshold()
@@ -387,6 +399,72 @@ class WifiMonitorService : Service() {
             .setContentIntent(settingsIntent)
             .build()
 
+        notificationManager.notify(alertNotificationId, notification)
+    }
+
+    private fun checkAndTriggerCaptivePortalBypass(state: WifiConnectionState) {
+        if (!state.isConnected) return
+        
+        val now = System.currentTimeMillis()
+        if (state.ssid == lastBypassAttemptSsid && now - lastBypassAttemptTimeMs < 15_000L) {
+            return
+        }
+        
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val redirectUrl = CaptivePortalBypasser.detectRedirectUrl()
+                if (!redirectUrl.isNullOrBlank()) {
+                    lastBypassAttemptSsid = state.ssid
+                    lastBypassAttemptTimeMs = System.currentTimeMillis()
+                    
+                    updateNotificationMessage("Đang tự vượt cổng chào WiFi '${state.ssid}'...")
+                    
+                    val result = CaptivePortalBypasser.attemptAutoBypass(redirectUrl)
+                    
+                    if (result.success) {
+                        Log.d("WifiMonitorService", "Captive portal auto-bypass success: ${result.message}")
+                        sendBypassSuccessNotification(state.ssid, result.portalName ?: "WiFi")
+                    } else {
+                        Log.d("WifiMonitorService", "Captive portal auto-bypass failed: ${result.message}")
+                    }
+                    
+                    updateConnectionState(force = true)
+                }
+            } catch (e: Exception) {
+                Log.e("WifiMonitorService", "Error in captive portal bypass trigger", e)
+            }
+        }
+    }
+
+    private fun updateNotificationMessage(message: String) {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        try {
+            notificationManager.notify(
+                notificationId,
+                buildNotification(message, 0)
+            )
+        } catch (_: Exception) {}
+    }
+
+    private fun sendBypassSuccessNotification(ssid: String, portalName: String) {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val alertChannel = NotificationChannel(
+                "wifi_alert_channel",
+                "Cảnh báo & Thông báo",
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+            notificationManager.createNotificationChannel(alertChannel)
+        }
+        
+        val notification = NotificationCompat.Builder(this, "wifi_alert_channel")
+            .setContentTitle("Đã tự động kết nối Internet")
+            .setContentText("Đã vượt qua trang xác thực '$portalName' trên WiFi '$ssid' thành công!")
+            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setAutoCancel(true)
+            .build()
+            
         notificationManager.notify(alertNotificationId, notification)
     }
 

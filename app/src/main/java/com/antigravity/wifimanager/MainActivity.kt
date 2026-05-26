@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.antigravity.wifimanager.data.RootStatus
+import com.antigravity.wifimanager.data.SharedWifiCredential
 import com.antigravity.wifimanager.data.WifiApInfo
 import com.antigravity.wifimanager.data.WifiAutoSwitcher
 import com.antigravity.wifimanager.data.WifiConnectionState
@@ -56,10 +57,13 @@ import com.antigravity.wifimanager.ui.screens.DashboardScreen
 import com.antigravity.wifimanager.ui.screens.HistoryScreen
 import com.antigravity.wifimanager.ui.screens.ScannerScreen
 import com.antigravity.wifimanager.ui.screens.SettingsScreen
+import com.antigravity.wifimanager.ui.screens.WifiPasswordsScreen
 import com.antigravity.wifimanager.ui.scanner.ScannerDisplayState
 import com.antigravity.wifimanager.ui.scanner.ScannerUiMapper
-import com.antigravity.wifimanager.ui.theme.Slate950
-import com.antigravity.wifimanager.ui.theme.WifiManagerTheme
+import com.antigravity.wifimanager.ui.theme.*
+import com.antigravity.wifimanager.ui.components.CosmicBackground
+import androidx.compose.foundation.border
+import androidx.compose.material.icons.filled.Key
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -203,6 +207,8 @@ class MainActivity : ComponentActivity() {
         var sharedWifiApiUrl by remember { mutableStateOf(repository.getSharedWifiApiUrl()) }
         var sharedWifiApiKey by remember { mutableStateOf(repository.getSharedWifiApiKey()) }
         var historyLogs by remember { mutableStateOf(repository.getHistoryLogs()) }
+        var savedPasswords by remember { mutableStateOf(repository.getSavedWifiPasswords()) }
+        var offlinePasswords by remember { mutableStateOf(listOf<SharedWifiCredential>()) }
         var isServiceRunning by remember { mutableStateOf(repository.isMonitoringEnabled()) }
         var scanStatusText by remember { mutableStateOf("Chưa quét") }
         var isScanning by remember { mutableStateOf(false) }
@@ -265,11 +271,11 @@ class MainActivity : ComponentActivity() {
                 !repository.isSharedWifiEnabled() -> ""
                 sharedFromApi > 0 -> {
                     val offlineStored = repository.getSharedWifiOfflineCount()
-                    " · $sharedFromApi từ cộng đồng · offline: $offlineStored"
+                    " · $sharedFromApi khớp mật khẩu · offline: $offlineStored"
                 }
                 repository.isWifiMasterEnabled() || repository.getSharedWifiApiUrl().isNotBlank() ||
                     repository.isSharedWifiOfflineEnabled() ->
-                    " · chưa khớp · offline: ${repository.getSharedWifiOfflineCount()}"
+                    " · 0 khớp mật khẩu · offline: ${repository.getSharedWifiOfflineCount()}"
                 else -> " · chưa bật nguồn"
             }
             scanStatusText = "Quét lúc $timeText ($sourceText) · $readyCount sẵn sàng$sharedHint"
@@ -443,8 +449,12 @@ class MainActivity : ComponentActivity() {
                     }
                     scannerConnectedSignal = if (connectionState.isConnected) connectionState.signalPercent else 0
                 }
-                2 -> historyLogs = repository.getHistoryLogs()
-                3 -> {
+                2 -> {
+                    savedPasswords = repository.getSavedWifiPasswords()
+                    offlinePasswords = repository.getSharedWifiRepository().loadAllOfflineCredentials()
+                }
+                3 -> historyLogs = repository.getHistoryLogs()
+                4 -> {
                     rootStatus = withContext(Dispatchers.IO) { repository.getRootStatus() }
                     batteryOptimized = !isIgnoringBatteryOptimizations()
                     sharedWifiOfflineCount = repository.getSharedWifiOfflineCount()
@@ -456,49 +466,91 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        Scaffold(
-            bottomBar = {
-                NavigationBar(
+        CosmicBackground {
+            Scaffold(
+                bottomBar = {
+                    NavigationBar(
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                            .clip(RoundedCornerShape(24.dp))
+                            .border(1.dp, Color(0x18FFFFFF), RoundedCornerShape(24.dp)),
+                        containerColor = Color(0x140B0D17), // Kính mờ siêu mỏng
+                        tonalElevation = 0.dp
+                    ) {
+                        NavigationBarItem(
+                            selected = currentTab == 0,
+                            onClick = { currentTab = 0 },
+                            icon = { Icon(imageVector = Icons.Default.Dashboard, contentDescription = null) },
+                            label = { Text("Trang chủ", fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = CyberCyan,
+                                selectedTextColor = CyberCyan,
+                                unselectedIconColor = TextSecondary,
+                                unselectedTextColor = TextSecondary,
+                                indicatorColor = Color(0x1406B6D4)
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == 1,
+                            onClick = { currentTab = 1 },
+                            icon = { Icon(imageVector = Icons.Default.Radar, contentDescription = null) },
+                            label = { Text("Quét WiFi", fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = CyberPurple,
+                                selectedTextColor = CyberPurple,
+                                unselectedIconColor = TextSecondary,
+                                unselectedTextColor = TextSecondary,
+                                indicatorColor = Color(0x148B5CF6)
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == 2,
+                            onClick = { currentTab = 2 },
+                            icon = { Icon(imageVector = Icons.Default.Key, contentDescription = null) },
+                            label = { Text("Mật khẩu", fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = CyberIndigo,
+                                selectedTextColor = CyberIndigo,
+                                unselectedIconColor = TextSecondary,
+                                unselectedTextColor = TextSecondary,
+                                indicatorColor = Color(0x146366F1)
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == 3,
+                            onClick = { currentTab = 3 },
+                            icon = { Icon(imageVector = Icons.Default.History, contentDescription = null) },
+                            label = { Text("Nhật ký", fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = CyberPink,
+                                selectedTextColor = CyberPink,
+                                unselectedIconColor = TextSecondary,
+                                unselectedTextColor = TextSecondary,
+                                indicatorColor = Color(0x14EC4899)
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == 4,
+                            onClick = { currentTab = 4 },
+                            icon = { Icon(imageVector = Icons.Default.Settings, contentDescription = null) },
+                            label = { Text("Cấu hình", fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = CyberAmber,
+                                selectedTextColor = CyberAmber,
+                                unselectedIconColor = TextSecondary,
+                                unselectedTextColor = TextSecondary,
+                                indicatorColor = Color(0x14F59E0B)
+                            )
+                        )
+                    }
+                },
+                containerColor = Color.Transparent // Cho phép nhìn thấy hình nền CosmicBackground
+            ) { innerPadding ->
+                Box(
                     modifier = Modifier
-                        .padding(16.dp)
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(Color(0x0AFFFFFF)),
-                    containerColor = Color(0x1F0F172A),
-                    tonalElevation = 0.dp
+                        .fillMaxSize()
+                        .padding(innerPadding)
                 ) {
-                    NavigationBarItem(
-                        selected = currentTab == 0,
-                        onClick = { currentTab = 0 },
-                        icon = { Icon(imageVector = Icons.Default.Dashboard, contentDescription = null) },
-                        label = { Text("Trang chủ", fontSize = 11.sp) }
-                    )
-                    NavigationBarItem(
-                        selected = currentTab == 1,
-                        onClick = { currentTab = 1 },
-                        icon = { Icon(imageVector = Icons.Default.Radar, contentDescription = null) },
-                        label = { Text("Quét WiFi", fontSize = 11.sp) }
-                    )
-                    NavigationBarItem(
-                        selected = currentTab == 2,
-                        onClick = { currentTab = 2 },
-                        icon = { Icon(imageVector = Icons.Default.History, contentDescription = null) },
-                        label = { Text("Nhật ký", fontSize = 11.sp) }
-                    )
-                    NavigationBarItem(
-                        selected = currentTab == 3,
-                        onClick = { currentTab = 3 },
-                        icon = { Icon(imageVector = Icons.Default.Settings, contentDescription = null) },
-                        label = { Text("Cấu hình", fontSize = 11.sp) }
-                    )
-                }
-            },
-            containerColor = Slate950
-        ) { innerPadding ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-            ) {
                 when (currentTab) {
                     0 -> DashboardScreen(
                         state = connectionState,
@@ -777,7 +829,33 @@ class MainActivity : ComponentActivity() {
                         }
                         )
                     }
-                    2 -> HistoryScreen(
+                    2 -> WifiPasswordsScreen(
+                        savedPasswords = savedPasswords,
+                        offlinePasswords = offlinePasswords,
+                        onDeletePassword = { ssid, bssid ->
+                            if (isSavingPassword) return@WifiPasswordsScreen
+                            coroutineScope.launch {
+                                isSavingPassword = true
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        repository.forgetNetwork(ssid, bssid)
+                                    }
+                                    savedPasswords = repository.getSavedWifiPasswords()
+                                    // Đồng bộ lại UI Quét WiFi nếu đang cache
+                                    if (scannedList.isNotEmpty()) {
+                                        reloadScannerFromCache()
+                                    }
+                                    ToastHelper.show(this@MainActivity, "Đã xóa và quên mạng '$ssid'")
+                                } finally {
+                                    isSavingPassword = false
+                                }
+                            }
+                        },
+                        onShowToast = { msg ->
+                            ToastHelper.show(this@MainActivity, msg, ToastDuration.SHORT)
+                        }
+                    )
+                    3 -> HistoryScreen(
                         historyLogs = historyLogs,
                         isClearingHistory = isClearingHistory,
                         onClearHistory = {
@@ -800,7 +878,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     )
-                    3 -> SettingsScreen(
+                    4 -> SettingsScreen(
                         threshold = threshold,
                         autoSwitchEnabled = autoSwitchEnabled,
                         prefer5GhzEnabled = prefer5GhzEnabled,
@@ -982,6 +1060,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
 
     override fun onDestroy() {
         if (isServiceBound) {
