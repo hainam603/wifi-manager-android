@@ -199,7 +199,9 @@ class SharedWifiRepository(private val context: Context) {
                 } else {
                     match.providerName
                 },
-                wifiMasterId = match.wifiMasterId
+                wifiMasterId = match.wifiMasterId,
+                latitude = match.latitude,
+                longitude = match.longitude
             )
         }
 

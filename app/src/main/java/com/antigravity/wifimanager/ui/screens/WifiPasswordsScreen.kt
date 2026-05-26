@@ -41,30 +41,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.antigravity.wifimanager.data.SharedWifiCredential
 import com.antigravity.wifimanager.data.WifiCredentialKeys
+import com.antigravity.wifimanager.ui.components.AddressText
 import com.antigravity.wifimanager.ui.components.GlassCard
 import com.antigravity.wifimanager.ui.theme.*
 import com.antigravity.wifimanager.util.LocationHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
-
-// Hàm helper tính khoảng cách địa lý Haversine (trả về số km)
-fun calculateDistanceKm(
-    userLat: Double?,
-    userLng: Double?,
-    wifiLat: Double?,
-    wifiLng: Double?
-): Double? {
-    if (userLat == null || userLng == null || wifiLat == null || wifiLng == null) return null
-    val r = 6371.0 // Bán kính Trái Đất (km)
-    val dLat = Math.toRadians(wifiLat - userLat)
-    val dLon = Math.toRadians(wifiLng - userLng)
-    val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(Math.toRadians(userLat)) * Math.cos(Math.toRadians(wifiLat)) *
-            Math.sin(dLon / 2) * Math.sin(dLon / 2)
-    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-    return r * c
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -135,7 +118,7 @@ fun WifiPasswordsScreen(
                     "Khoảng cách (km)" -> {
                         val maxKm = q.toDoubleOrNull()
                         if (maxKm != null && userLat != null && userLng != null && cred.latitude != null && cred.longitude != null) {
-                            val dist = calculateDistanceKm(userLat, userLng, cred.latitude, cred.longitude)
+                            val dist = LocationHelper.calculateDistanceKm(userLat, userLng, cred.latitude, cred.longitude)
                             dist != null && dist <= maxKm
                         } else {
                             // Nếu chưa có vị trí GPS hoặc parse lỗi, mặc định hiển thị
@@ -148,7 +131,7 @@ fun WifiPasswordsScreen(
         }.sortedBy { cred ->
             // Sắp xếp ưu tiên khoảng cách gần người dùng nhất
             if (userLat != null && userLng != null && cred.latitude != null && cred.longitude != null) {
-                calculateDistanceKm(userLat, userLng, cred.latitude, cred.longitude) ?: Double.MAX_VALUE
+                LocationHelper.calculateDistanceKm(userLat, userLng, cred.latitude, cred.longitude) ?: Double.MAX_VALUE
             } else {
                 Double.MAX_VALUE
             }
@@ -532,7 +515,7 @@ fun WifiPasswordsScreen(
                                     Box(modifier = Modifier.weight(0.42f)) {
                                         if (cred.latitude != null && cred.longitude != null) {
                                             val dist = if (userLat != null && userLng != null) {
-                                                calculateDistanceKm(userLat, userLng, cred.latitude, cred.longitude)
+                                                LocationHelper.calculateDistanceKm(userLat, userLng, cred.latitude, cred.longitude)
                                             } else null
 
                                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -598,44 +581,4 @@ fun WifiPasswordsScreen(
             }
         }
     }
-}
-
-/**
- * Composable tra cứu địa chỉ thực tế từ Geocoder bất đồng bộ và an toàn.
- */
-@Composable
-fun AddressText(
-    latitude: Double,
-    longitude: Double,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    var addressText by remember(latitude, longitude) { mutableStateOf("Đang tìm vị trí...") }
-
-    LaunchedEffect(latitude, longitude) {
-        withContext(Dispatchers.IO) {
-            try {
-                val geocoder = Geocoder(context, Locale("vi", "VN"))
-                @Suppress("DEPRECATION")
-                val addresses = geocoder.getFromLocation(latitude, longitude, 1)
-                val address = addresses?.firstOrNull()
-                
-                if (address != null) {
-                    val fullAddress = address.getAddressLine(0)
-                    addressText = fullAddress ?: "${"%.4f".format(latitude)}, ${"%.4f".format(longitude)}"
-                } else {
-                    addressText = "${"%.4f".format(latitude)}, ${"%.4f".format(longitude)}"
-                }
-            } catch (e: Exception) {
-                addressText = "${"%.4f".format(latitude)}, ${"%.4f".format(longitude)}"
-            }
-        }
-    }
-
-    Text(
-        text = addressText,
-        fontSize = 9.sp,
-        color = TextSecondary,
-        modifier = modifier
-    )
 }

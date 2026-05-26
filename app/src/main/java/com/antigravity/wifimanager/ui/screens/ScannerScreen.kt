@@ -13,9 +13,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
+import androidx.compose.ui.platform.LocalContext
+import com.antigravity.wifimanager.ui.components.AddressText
+import com.antigravity.wifimanager.util.LocationHelper
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,6 +51,7 @@ fun ScannerScreen(
     isScanning: Boolean = false,
     isRealtimeScanning: Boolean = false,
     connectingApKey: String? = null,
+    connectionProgressText: String = "",
     connectFailedApKeys: Set<String> = emptySet(),
     rootConnectAvailable: Boolean = true,
     isPasswordBusy: Boolean = false,
@@ -63,6 +68,10 @@ fun ScannerScreen(
 ) {
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
+    val userLocation = remember { LocationHelper.getLastKnownLocation(context) }
+    val userLat = userLocation?.latitude
+    val userLng = userLocation?.longitude
     var passwordDialogSsid by remember { mutableStateOf<String?>(null) }
     var passwordDialogBssid by remember { mutableStateOf<String?>(null) }
     var passwordDialogSimilarSsid by remember { mutableStateOf<String?>(null) }
@@ -281,6 +290,7 @@ fun ScannerScreen(
                     scanCounter = scanCounter,
                     connectedSignalPercent = connectedSignalPercent,
                     connectingApKey = connectingApKey,
+                    connectionProgressText = connectionProgressText,
                     connectFailedApKeys = connectFailedApKeys,
                     refreshingPasswordApKey = refreshingPasswordApKey,
                     rootConnectAvailable = rootConnectAvailable,
@@ -289,6 +299,8 @@ fun ScannerScreen(
                     onRefreshPasswordForBssid = onRefreshPasswordForBssid,
                     coroutineScope = coroutineScope,
                     snackbarHostState = snackbarHostState,
+                    userLat = userLat,
+                    userLng = userLng,
                     onOpenPasswordDialog = { ssid, bssid, initial, similarSsid ->
                         passwordDialogSsid = ssid
                         passwordDialogBssid = bssid
@@ -433,6 +445,7 @@ private fun ScannerNetworkList(
     scanCounter: Int = 0,
     connectedSignalPercent: Int,
     connectingApKey: String?,
+    connectionProgressText: String,
     connectFailedApKeys: Set<String>,
     refreshingPasswordApKey: String?,
     rootConnectAvailable: Boolean,
@@ -441,6 +454,8 @@ private fun ScannerNetworkList(
     onRefreshPasswordForBssid: suspend (String, String) -> WifiCredentialRefreshResult,
     coroutineScope: kotlinx.coroutines.CoroutineScope,
     snackbarHostState: SnackbarHostState,
+    userLat: Double?,
+    userLng: Double?,
     onOpenPasswordDialog: (ssid: String, bssid: String, initial: String, similarSsid: String?) -> Unit
 ) {
     val listState = rememberLazyListState()
@@ -473,6 +488,7 @@ private fun ScannerNetworkList(
                     signalPercentOverride = connectedSignalPercent,
                     isConnectedState = true,
                     connectingApKey = connectingApKey,
+                    connectionProgressText = connectionProgressText,
                     connectFailedApKeys = connectFailedApKeys,
                     refreshingPasswordApKey = refreshingPasswordApKey,
                     rootConnectAvailable = rootConnectAvailable,
@@ -481,6 +497,8 @@ private fun ScannerNetworkList(
                     onRefreshPasswordForBssid = onRefreshPasswordForBssid,
                     coroutineScope = coroutineScope,
                     snackbarHostState = snackbarHostState,
+                    userLat = userLat,
+                    userLng = userLng,
                     onOpenPasswordDialog = onOpenPasswordDialog
                 )
             }
@@ -506,6 +524,7 @@ private fun ScannerNetworkList(
                     row = row,
                     isConnectedState = false,
                     connectingApKey = connectingApKey,
+                    connectionProgressText = connectionProgressText,
                     connectFailedApKeys = connectFailedApKeys,
                     refreshingPasswordApKey = refreshingPasswordApKey,
                     rootConnectAvailable = rootConnectAvailable,
@@ -514,6 +533,8 @@ private fun ScannerNetworkList(
                     onRefreshPasswordForBssid = onRefreshPasswordForBssid,
                     coroutineScope = coroutineScope,
                     snackbarHostState = snackbarHostState,
+                    userLat = userLat,
+                    userLng = userLng,
                     onOpenPasswordDialog = onOpenPasswordDialog
                 )
             }
@@ -539,6 +560,7 @@ private fun ScannerNetworkList(
                     row = row,
                     isConnectedState = false,
                     connectingApKey = connectingApKey,
+                    connectionProgressText = connectionProgressText,
                     connectFailedApKeys = connectFailedApKeys,
                     refreshingPasswordApKey = refreshingPasswordApKey,
                     rootConnectAvailable = rootConnectAvailable,
@@ -547,6 +569,8 @@ private fun ScannerNetworkList(
                     onRefreshPasswordForBssid = onRefreshPasswordForBssid,
                     coroutineScope = coroutineScope,
                     snackbarHostState = snackbarHostState,
+                    userLat = userLat,
+                    userLng = userLng,
                     onOpenPasswordDialog = onOpenPasswordDialog
                 )
             }
@@ -560,6 +584,7 @@ private fun ScannerApListItem(
     signalPercentOverride: Int? = null,
     isConnectedState: Boolean,
     connectingApKey: String?,
+    connectionProgressText: String,
     connectFailedApKeys: Set<String>,
     refreshingPasswordApKey: String?,
     rootConnectAvailable: Boolean,
@@ -568,6 +593,8 @@ private fun ScannerApListItem(
     onRefreshPasswordForBssid: suspend (String, String) -> WifiCredentialRefreshResult,
     coroutineScope: kotlinx.coroutines.CoroutineScope,
     snackbarHostState: SnackbarHostState,
+    userLat: Double?,
+    userLng: Double?,
     onOpenPasswordDialog: (ssid: String, bssid: String, initial: String, similarSsid: String?) -> Unit
 ) {
     val ap = if (signalPercentOverride != null) {
@@ -589,7 +616,10 @@ private fun ScannerApListItem(
         ap = ap,
         isConnectedState = isConnectedState,
         isConnecting = connectingApKey == apKey,
+        connectionProgressText = connectionProgressText,
         connectFailed = isConnectFailed,
+        userLat = userLat,
+        userLng = userLng,
         connectEnabled = true, // Cho phép bấm để nhập/sao chép kể cả khi chưa có Root
         connectBlocked = connectingApKey != null || refreshingPasswordApKey != null,
         passwordDisplay = row.passwordDisplay ?: row.savedPassword,
@@ -663,12 +693,15 @@ private fun WifiApRow(
     ap: WifiApInfo,
     isConnectedState: Boolean,
     isConnecting: Boolean = false,
+    connectionProgressText: String? = null,
     connectFailed: Boolean = false,
     connectEnabled: Boolean = true,
     connectBlocked: Boolean = false,
     passwordDisplay: String? = null,
     showRefreshPasswordButton: Boolean = false,
     isRefreshingPassword: Boolean = false,
+    userLat: Double? = null,
+    userLng: Double? = null,
     onRefreshPasswordClick: () -> Unit = {},
     onConnectClick: () -> Unit,
     onEditPasswordClick: () -> Unit
@@ -676,6 +709,7 @@ private fun WifiApRow(
     // Vạch màu đứng bên mép trái chỉ thị cường độ sóng hoặc kết nối tích cực
     val leftIndicatorColor = when {
         isConnectedState -> CyberCyan
+        isConnecting -> CyberCyan // Cho sáng Cyan khi đang kết nối
         ap.signalPercent >= 70 -> CyberEmerald
         ap.signalPercent >= 45 -> CyberAmber
         else -> CyberRose
@@ -782,6 +816,39 @@ private fun WifiApRow(
                     )
                 }
 
+                // Hàng 3: Vị trí & Khoảng cách (Chỉ hiển thị cho mạng cộng đồng có tọa độ)
+                if (ap.latitude != null && ap.longitude != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    val dist = if (userLat != null && userLng != null) {
+                        LocationHelper.calculateDistanceKm(userLat, userLng, ap.latitude, ap.longitude)
+                    } else null
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = null,
+                            tint = CyberCyan,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        val distStr = if (dist != null) "Cách bạn ${"%.2f".format(dist)} km · " else ""
+                        if (distStr.isNotEmpty()) {
+                            Text(
+                                text = distStr,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = CyberCyan
+                            )
+                        }
+                        AddressText(
+                            latitude = ap.latitude,
+                            longitude = ap.longitude
+                        )
+                    }
+                }
+
                 // Trạng thái kết nối / lỗi
                 if (isConnecting) {
                     Row(
@@ -795,7 +862,7 @@ private fun WifiApRow(
                             strokeWidth = 1.5.dp
                         )
                         Text(
-                            text = "Đang liên kết mạng...",
+                            text = if (connectionProgressText.isNullOrBlank()) "Đang liên kết mạng..." else connectionProgressText,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = CyberCyan
@@ -900,7 +967,7 @@ private fun WifiApRow(
                 }
             }
 
-            // Cột bên phải: % Sóng và Nút sửa mật khẩu
+            // Cột bên phải: % Sóng và Nút sửa mật khẩu (Hoặc spinner khi đang kết nối)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -909,7 +976,7 @@ private fun WifiApRow(
                     text = "${ap.signalPercent}%",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Black,
-                    color = if (isConnectedState) {
+                    color = if (isConnectedState || isConnecting) {
                         Color.White
                     } else {
                         when {

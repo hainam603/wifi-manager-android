@@ -1366,19 +1366,35 @@ class WifiRepository(private val context: Context) {
         val message: String
     )
 
+    private fun getSupplicantStateDescription(state: android.net.wifi.SupplicantState?): String {
+        if (state == null) return "Đang kết nối..."
+        return when (state) {
+            android.net.wifi.SupplicantState.ASSOCIATING -> "Đang liên kết với điểm phát..."
+            android.net.wifi.SupplicantState.ASSOCIATED -> "Đã liên kết, đang xác thực..."
+            android.net.wifi.SupplicantState.AUTHENTICATING -> "Đang xác thực mật khẩu..."
+            android.net.wifi.SupplicantState.FOUR_WAY_HANDSHAKE,
+            android.net.wifi.SupplicantState.GROUP_HANDSHAKE -> "Đang trao đổi khóa bảo mật..."
+            android.net.wifi.SupplicantState.COMPLETED -> "Đang lấy địa chỉ IP (DHCP)..."
+            android.net.wifi.SupplicantState.SCANNING -> "Đang quét tìm tín hiệu WiFi..."
+            android.net.wifi.SupplicantState.DISCONNECTED -> "Đang ngắt kết nối mạng cũ..."
+            android.net.wifi.SupplicantState.INACTIVE -> "Đang chờ kích hoạt kết nối..."
+            android.net.wifi.SupplicantState.INTERFACE_DISABLED -> "Giao diện WiFi bị tắt..."
+            else -> "Đang chuẩn bị kết nối..."
+        }
+    }
+
     /** Kết nối im lặng (không hộp thoại): chỉ ROOT + xác minh kết quả. */
     fun connectToNetwork(
         ssid: String,
         password: String? = null,
         securityHint: String? = null,
-        bssid: String? = null
+        bssid: String? = null,
+        onProgress: ((String) -> Unit)? = null
     ): ConnectResult {
         val requiresPassword = requiresPasswordFromHint(securityHint)
         val psk = resolveConnectionPassword(ssid, password, bssid)
         val hasSystemProfile = isSystemConnectedSsid(ssid)
         val sharedCred = sharedWifiRepository.findSharedCredential(ssid, bssid, this)
-        val sharedApiPassword = sharedCred?.password
-            ?: sharedWifiRepository.resolvePassword(ssid, bssid, this)
 
         if (requiresPassword && psk.isNullOrBlank() && !hasSystemProfile) {
             if (sharedCred != null &&
@@ -1403,9 +1419,10 @@ class WifiRepository(private val context: Context) {
         }
 
         markAppManaged(ssid)
+        onProgress?.invoke("Đang khởi tạo cấu hình & kết nối qua root...")
         connectToSsidViaRoot(ssid, psk, securityHint)
 
-        return if (waitUntilConnectedTo(ssid, timeoutMs = 12_000)) {
+        return if (waitUntilConnectedTo(ssid, timeoutMs = 12_000, onProgress = onProgress)) {
             if (!psk.isNullOrBlank()) {
                 saveWifiPassword(ssid, psk, bssid)
             }
@@ -1480,13 +1497,38 @@ class WifiRepository(private val context: Context) {
             hint.contains("PSK", ignoreCase = true)
     }
 
-    private fun waitUntilConnectedTo(ssid: String, timeoutMs: Long): Boolean {
+    private fun waitUntilConnectedTo(ssid: String, timeoutMs: Long, onProgress: ((String) -> Unit)? = null): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
+        var lastStateStr = ""
         while (System.currentTimeMillis() < deadline) {
             val state = getCurrentConnectionState()
+            
+            @Suppress("DEPRECATION")
+            val info = wifiManager.connectionInfo
+            val currentSsid = info?.ssid?.replace("\"", "") ?: ""
+            
             if (state.isConnected && ssidsMatch(state.ssid, ssid)) {
+                onProgress?.invoke("Kết nối thành công!")
                 return true
             }
+            
+            val progressText = if (info != null && ssidsMatch(currentSsid, ssid)) {
+                val suppState = info.supplicantState
+                val desc = getSupplicantStateDescription(suppState)
+                if (suppState == android.net.wifi.SupplicantState.COMPLETED && state.ipAddress.isEmpty()) {
+                    "Xác thực xong, đang lấy địa chỉ IP..."
+                } else {
+                    desc
+                }
+            } else {
+                "Đang cấu hình và bắt sóng WiFi..."
+            }
+            
+            if (progressText != lastStateStr) {
+                lastStateStr = progressText
+                onProgress?.invoke(progressText)
+            }
+            
             Thread.sleep(400)
         }
         return false

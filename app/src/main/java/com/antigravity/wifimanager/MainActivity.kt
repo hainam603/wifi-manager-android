@@ -213,6 +213,7 @@ class MainActivity : ComponentActivity() {
         var scanStatusText by remember { mutableStateOf("Chưa quét") }
         var isScanning by remember { mutableStateOf(false) }
         var connectingApKey by remember { mutableStateOf<String?>(null) }
+        var connectionProgressText by remember { mutableStateOf("") }
         var connectFailedApKeys by remember { mutableStateOf(setOf<String>()) }
         var rootStatus by remember { mutableStateOf(RootStatus.UNAVAILABLE) }
         var batteryOptimized by remember { mutableStateOf(!isIgnoringBatteryOptimizations()) }
@@ -666,6 +667,7 @@ class MainActivity : ComponentActivity() {
                         isScanning = isScanning,
                         isRealtimeScanning = isRealtimeScanning,
                         connectingApKey = connectingApKey,
+                        connectionProgressText = connectionProgressText,
                         connectFailedApKeys = connectFailedApKeys,
                         rootConnectAvailable = rootStatus == RootStatus.GRANTED,
                         isPasswordBusy = isSavingPassword,
@@ -685,6 +687,7 @@ class MainActivity : ComponentActivity() {
                             val key = "${ssid.lowercase()}|${bssid.lowercase()}"
                             coroutineScope.launch {
                                 connectingApKey = key
+                                connectionProgressText = "Đang chuẩn bị thông tin cấu hình..."
                                 val result = try {
                                     val ap = scannedList.find { it.ssid == ssid && it.bssid == bssid }
                                         ?: scannedList.find { it.ssid == ssid }
@@ -700,11 +703,17 @@ class MainActivity : ComponentActivity() {
                                             ssid = ssid,
                                             password = if (preferApiPassword) ap?.sharedPasswordFromApi else psk,
                                             securityHint = ap?.securityType,
-                                            bssid = ap?.bssid ?: bssid
+                                            bssid = ap?.bssid ?: bssid,
+                                            onProgress = { progress ->
+                                                coroutineScope.launch(Dispatchers.Main) {
+                                                    connectionProgressText = progress
+                                                }
+                                            }
                                         )
                                     }
                                 } finally {
                                     connectingApKey = null
+                                    connectionProgressText = ""
                                 }
                                 connectionState = repository.getCurrentConnectionState()
                                 scannerConnectedSignal = if (connectionState.isConnected) {

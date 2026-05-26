@@ -17,7 +17,7 @@ data class ScannerApRowModel(
     val similarPassword: String?
 ) {
     val stableKey: String
-        get() = ap.ssid.lowercase(Locale.getDefault())
+        get() = "${ap.ssid.lowercase(Locale.getDefault())}|${ap.bssid.lowercase(Locale.getDefault())}"
 }
 
 @Immutable
