@@ -1,10 +1,13 @@
 package com.antigravity.wifimanager
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.ServiceConnection
+import android.net.wifi.WifiManager
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -25,9 +28,9 @@ import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -44,6 +47,8 @@ import com.antigravity.wifimanager.util.MonitorServiceStarter
 import com.antigravity.wifimanager.util.WifiScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -51,8 +56,6 @@ import com.antigravity.wifimanager.ui.screens.DashboardScreen
 import com.antigravity.wifimanager.ui.screens.HistoryScreen
 import com.antigravity.wifimanager.ui.screens.ScannerScreen
 import com.antigravity.wifimanager.ui.screens.SettingsScreen
-import com.antigravity.wifimanager.ui.screens.SystemScannerScreen
-import com.antigravity.wifimanager.ui.screens.SystemScannerRowModel
 import com.antigravity.wifimanager.ui.scanner.ScannerDisplayState
 import com.antigravity.wifimanager.ui.scanner.ScannerUiMapper
 import com.antigravity.wifimanager.ui.theme.Slate950
@@ -219,60 +222,11 @@ class MainActivity : ComponentActivity() {
         var scanJob by remember { mutableStateOf<Job?>(null) }
         var scanCounter by remember { mutableIntStateOf(0) }
         val scannerDisplayMutex = remember { Mutex() }
+        val realtimeReloadMutex = remember { Mutex() }
+        var isRealtimeScanning by remember { mutableStateOf(false) }
         var autoUpdateIntervalDays by remember { mutableIntStateOf(repository.getAutoUpdateIntervalDays()) }
         var lastAutoUpdateMs by remember { mutableLongStateOf(repository.getLastAutoUpdateMs()) }
         var isAutoUpdating by remember { mutableStateOf(false) }
-
-        var systemScannedList by remember { mutableStateOf(listOf<WifiApInfo>()) }
-        var systemScannerRows by remember { mutableStateOf(listOf<SystemScannerRowModel>()) }
-        var isSystemScanning by remember { mutableStateOf(false) }
-        var systemScanStatusText by remember { mutableStateOf("Chưa quét") }
-        var systemScanJob by remember { mutableStateOf<Job?>(null) }
-        var systemConnectingApKey by remember { mutableStateOf<String?>(null) }
-        var systemConnectFailedApKeys by remember { mutableStateOf(setOf<String>()) }
-
-        fun updateSystemScanStatusText() {
-            val lastScanMs = repository.getLastScanAtMs()
-            if (lastScanMs <= 0L) {
-                systemScanStatusText = "Chưa quét"
-                return
-            }
-            val timeText = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(lastScanMs))
-            val rawCount = systemScannedList.size
-            val savedCount = systemScannedList.count { it.isSaved }
-            systemScanStatusText = "Quét lúc $timeText · Tìm thấy $rawCount mạng ($savedCount đã lưu)"
-        }
-
-        suspend fun refreshSystemNetworksAndWait(forceRefresh: Boolean = false) {
-            if (isSystemScanning || systemConnectingApKey != null) return
-            isSystemScanning = true
-            if (forceRefresh) {
-                systemScanStatusText = "Đang quét WiFi hệ thống..."
-            }
-            try {
-                systemScannedList = withContext(Dispatchers.IO) {
-                    repository.scanSystemOnly(forceRefresh = forceRefresh)
-                }
-                updateSystemScanStatusText()
-            } finally {
-                isSystemScanning = false
-            }
-        }
-
-        fun startSystemScanFromButton() {
-            if (systemConnectingApKey != null) return
-            if (systemScanJob?.isActive == true) return
-            systemScanJob = coroutineScope.launch {
-                try {
-                    refreshSystemNetworksAndWait(forceRefresh = true)
-                    connectionState = withContext(Dispatchers.IO) {
-                        repository.getCurrentConnectionState()
-                    }
-                } finally {
-                    systemScanJob = null
-                }
-            }
-        }
 
         suspend fun rebuildScannerDisplay() {
             val snapshot = connectionState
@@ -296,38 +250,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        LaunchedEffect(systemScannedList, connectionState) {
-            val snapshot = connectionState
-            val rawList = systemScannedList
-            systemScannerRows = withContext(Dispatchers.IO) {
-                val grouped = rawList
-                    .filter { it.ssid.isNotBlank() }
-                    .groupBy { it.ssid.lowercase(Locale.getDefault()) }
-                    .values
-                    .mapNotNull { group ->
-                        group.maxWithOrNull(
-                            compareByDescending<WifiApInfo> { it.signalPercent }
-                                .thenByDescending { it.is5GHz }
-                                .thenByDescending { it.frequencyMhz }
-                                .thenBy { it.ssid.lowercase(Locale.getDefault()) }
-                        )
-                    }
-
-                grouped.map { ap ->
-                    val savedPassword = repository.resolvePasswordForDisplay(ap.ssid, bssid = ap.bssid)
-                    val hasCred = repository.hasStoredCredential(ap.ssid)
-                    val isConnected = snapshot.isConnected && repository.ssidsMatch(snapshot.ssid, ap.ssid)
-                    SystemScannerRowModel(
-                        ap = ap,
-                        savedPassword = savedPassword,
-                        hasSystemCredential = hasCred,
-                        isConnected = isConnected
-                    )
-                }
-            }
-        }
-
-
         fun updateScanStatusText() {
             val lastScanMs = repository.getLastScanAtMs()
             if (lastScanMs <= 0L) {
@@ -337,7 +259,7 @@ class MainActivity : ComponentActivity() {
 
             val timeText = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(lastScanMs))
             val sourceText = if (repository.wasLastScanServedFromCache()) "cache" else "mới"
-            val readyCount = scannedList.count { it.isReadyToConnect }
+            val readyCount = scannedList.count { it.isScannerConnectable() }
             val sharedFromApi = scannedList.count { !it.sharedProviderName.isNullOrBlank() }
             val sharedHint = when {
                 !repository.isSharedWifiEnabled() -> ""
@@ -355,9 +277,9 @@ class MainActivity : ComponentActivity() {
             sharedWifiOfflineStorageUsedMb = repository.getSharedWifiOfflineStorageMb()
         }
 
-        suspend fun reloadScannerFromCache() {
+        suspend fun reloadScannerFromCache(ignoreAppCache: Boolean = false) {
             scannedList = withContext(Dispatchers.IO) {
-                repository.scanNearbyNetworks(forceRefresh = false)
+                repository.scanNearbyNetworks(forceRefresh = false, ignoreAppCache = ignoreAppCache)
             }
             scannerConnectedSignal = withContext(Dispatchers.IO) {
                 val s = repository.getCurrentConnectionState()
@@ -367,6 +289,23 @@ class MainActivity : ComponentActivity() {
                 rebuildScannerDisplay()
             }
             updateScanStatusText()
+        }
+
+        /** Cập nhật danh sách từ kết quả quét OS mới (debounce, không chặn UI). */
+        suspend fun reloadScannerFromRealtime() {
+            if (connectingApKey != null || isScanning || currentTab != 1) return
+            realtimeReloadMutex.withLock {
+                if (connectingApKey != null || isScanning) return
+                reloadScannerFromCache(ignoreAppCache = true)
+                connectionState = withContext(Dispatchers.IO) {
+                    repository.getCurrentConnectionState()
+                }
+                scannerConnectedSignal = if (connectionState.isConnected) {
+                    connectionState.signalPercent
+                } else {
+                    0
+                }
+            }
         }
 
         suspend fun refreshScannedNetworksAndWait(forceRefresh: Boolean = false) {
@@ -411,7 +350,53 @@ class MainActivity : ComponentActivity() {
             startScanFromButton()
         }
 
-        // Đồng bộ dữ liệu động từ Dịch vụ chạy ngầm khi được bind thành công
+        // Quét realtime khi đang ở tab Quét WiFi
+        DisposableEffect(currentTab) {
+            if (currentTab != 1) {
+                isRealtimeScanning = false
+                return@DisposableEffect onDispose { }
+            }
+
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    if (intent?.action != WifiManager.SCAN_RESULTS_AVAILABLE_ACTION) return
+                    coroutineScope.launch {
+                        delay(150)
+                        reloadScannerFromRealtime()
+                    }
+                }
+            }
+            val filter = IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
+            ContextCompat.registerReceiver(
+                this@MainActivity,
+                receiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            isRealtimeScanning = true
+
+            onDispose {
+                isRealtimeScanning = false
+                try {
+                    unregisterReceiver(receiver)
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        LaunchedEffect(currentTab) {
+            if (currentTab != 1) return@LaunchedEffect
+            while (isActive) {
+                if (connectingApKey == null && !isScanning) {
+                    withContext(Dispatchers.IO) {
+                        repository.requestWifiScan()
+                    }
+                }
+                delay(4_500L)
+            }
+        }
+
+        // Đồng bộ dữ liệu động từ Dịch vụ chạy ngần khi được bind thành công
         LaunchedEffect(wifiService, isServiceBound) {
             isServiceRunning = wifiService != null
             wifiService?.let { service ->
@@ -458,19 +443,8 @@ class MainActivity : ComponentActivity() {
                     }
                     scannerConnectedSignal = if (connectionState.isConnected) connectionState.signalPercent else 0
                 }
-                2 -> {
-                    rootStatus = withContext(Dispatchers.IO) { repository.getRootStatus() }
-                    connectionState = withContext(Dispatchers.IO) {
-                        repository.getCurrentConnectionState()
-                    }
-                    if (systemScannedList.isEmpty()) {
-                        refreshSystemNetworksAndWait(forceRefresh = false)
-                    } else {
-                        updateSystemScanStatusText()
-                    }
-                }
-                3 -> historyLogs = repository.getHistoryLogs()
-                4 -> {
+                2 -> historyLogs = repository.getHistoryLogs()
+                3 -> {
                     rootStatus = withContext(Dispatchers.IO) { repository.getRootStatus() }
                     batteryOptimized = !isIgnoringBatteryOptimizations()
                     sharedWifiOfflineCount = repository.getSharedWifiOfflineCount()
@@ -507,18 +481,12 @@ class MainActivity : ComponentActivity() {
                     NavigationBarItem(
                         selected = currentTab == 2,
                         onClick = { currentTab = 2 },
-                        icon = { Icon(imageVector = Icons.Default.Wifi, contentDescription = null) },
-                        label = { Text("Hệ thống", fontSize = 11.sp) }
-                    )
-                    NavigationBarItem(
-                        selected = currentTab == 3,
-                        onClick = { currentTab = 3 },
                         icon = { Icon(imageVector = Icons.Default.History, contentDescription = null) },
                         label = { Text("Nhật ký", fontSize = 11.sp) }
                     )
                     NavigationBarItem(
-                        selected = currentTab == 4,
-                        onClick = { currentTab = 4 },
+                        selected = currentTab == 3,
+                        onClick = { currentTab = 3 },
                         icon = { Icon(imageVector = Icons.Default.Settings, contentDescription = null) },
                         label = { Text("Cấu hình", fontSize = 11.sp) }
                     )
@@ -641,9 +609,10 @@ class MainActivity : ComponentActivity() {
                         networks = scannedList,
                         connectionState = connectionState,
                         displayState = scannerDisplay,
-                        networkCount = scannedList.size,
+                        networkCount = scannedList.count { it.isScannerConnectable() },
                         scanStatusText = scanStatusText,
                         isScanning = isScanning,
+                        isRealtimeScanning = isRealtimeScanning,
                         connectingApKey = connectingApKey,
                         connectFailedApKeys = connectFailedApKeys,
                         rootConnectAvailable = rootStatus == RootStatus.GRANTED,
@@ -720,21 +689,6 @@ class MainActivity : ComponentActivity() {
                         },
                         onGetSavedPassword = { ssid, bssid ->
                             repository.getSavedWifiPassword(ssid, bssid)
-                        },
-                        onSavePassword = { ssid, password, bssid ->
-                            if (isSavingPassword) return@ScannerScreen
-                            coroutineScope.launch {
-                                isSavingPassword = true
-                                try {
-                                    withContext(Dispatchers.IO) {
-                                        repository.saveWifiPassword(ssid, password, bssid)
-                                        repository.suggestNetworks(repository.getAllowedSsids().toList())
-                                    }
-                                    reloadScannerFromCache()
-                                } finally {
-                                    isSavingPassword = false
-                                }
-                            }
                         },
                         onRemovePassword = { ssid, bssid ->
                             android.util.Log.e("MainActivity", "onRemovePassword called: ssid='$ssid', bssid='$bssid', isSavingPassword=$isSavingPassword")
@@ -823,154 +777,7 @@ class MainActivity : ComponentActivity() {
                         }
                         )
                     }
-                    2 -> {
-                        SystemScannerScreen(
-                            networks = systemScannerRows,
-                            connectionState = connectionState,
-                            scanStatusText = systemScanStatusText,
-                            isScanning = isSystemScanning,
-                            connectingApKey = systemConnectingApKey,
-                            connectFailedApKeys = systemConnectFailedApKeys,
-                            rootConnectAvailable = rootStatus == RootStatus.GRANTED,
-                            isPasswordBusy = isSavingPassword,
-                            onRefreshScan = { startSystemScanFromButton() },
-                            onConnectNetwork = { ssid, bssid, password ->
-                                if (systemConnectingApKey != null || isSystemScanning) return@SystemScannerScreen
-                                val key = "${ssid.lowercase()}|${bssid.lowercase()}"
-                                coroutineScope.launch {
-                                    systemConnectingApKey = key
-                                    try {
-                                        val isRoot = withContext(Dispatchers.IO) { repository.isRootAvailable() }
-                                        if (isRoot) {
-                                            val ap = systemScannedList.find { it.ssid == ssid && it.bssid == bssid }
-                                                ?: systemScannedList.find { it.ssid == ssid }
-                                            val psk = password?.trim()?.takeIf { it.isNotEmpty() }
-                                                ?: repository.getSavedWifiPassword(ssid, ap?.bssid ?: bssid)
-                                            val result = withContext(Dispatchers.IO) {
-                                                repository.connectToNetwork(
-                                                    ssid = ssid,
-                                                    password = psk,
-                                                    securityHint = ap?.securityType,
-                                                    bssid = ap?.bssid ?: bssid
-                                                )
-                                            }
-                                            ToastHelper.show(this@MainActivity, result.message)
-                                            if (result.success) {
-                                                systemConnectFailedApKeys = systemConnectFailedApKeys - key
-                                            } else {
-                                                systemConnectFailedApKeys = systemConnectFailedApKeys + key
-                                            }
-                                        } else {
-                                            val ap = systemScannedList.find { it.ssid == ssid && it.bssid == bssid }
-                                                ?: systemScannedList.find { it.ssid == ssid }
-                                            val psk = password?.trim()?.takeIf { it.isNotEmpty() }
-                                                ?: repository.getSavedWifiPassword(ssid, ap?.bssid ?: bssid)
-                                            ToastHelper.show(this@MainActivity, "Đang yêu cầu hệ thống kết nối tới '$ssid'...")
-                                            withContext(Dispatchers.IO) {
-                                                repository.connectToSsidViaSpecifier(
-                                                    ssid = ssid,
-                                                    password = psk,
-                                                    securityHint = ap?.securityType
-                                                )
-                                            }
-                                        }
-                                    } catch (e: Exception) {
-                                        e.printStackTrace()
-                                        ToastHelper.show(this@MainActivity, "Lỗi kết nối: ${e.localizedMessage}")
-                                    } finally {
-                                        systemConnectingApKey = null
-                                        refreshSystemNetworksAndWait(forceRefresh = false)
-                                        connectionState = repository.getCurrentConnectionState()
-                                    }
-                                }
-                            },
-                            onHasSystemCredential = { ssid ->
-                                repository.hasStoredCredential(ssid)
-                            },
-                            onGetSavedPassword = { ssid, bssid ->
-                                repository.getSavedWifiPassword(ssid, bssid)
-                            },
-                            onSavePassword = { ssid, password, bssid ->
-                                if (isSavingPassword) return@SystemScannerScreen
-                                coroutineScope.launch {
-                                    isSavingPassword = true
-                                    try {
-                                        withContext(Dispatchers.IO) {
-                                            repository.saveWifiPassword(ssid, password, bssid)
-                                            repository.suggestNetworks(repository.getAllowedSsids().toList())
-                                        }
-                                        refreshSystemNetworksAndWait(forceRefresh = false)
-                                    } finally {
-                                        isSavingPassword = false
-                                    }
-                                }
-                            },
-                            onRemovePassword = { ssid, bssid ->
-                                if (isSavingPassword) return@SystemScannerScreen
-                                coroutineScope.launch {
-                                    isSavingPassword = true
-                                    systemConnectFailedApKeys = systemConnectFailedApKeys.filter { key ->
-                                        val (storedSsid, _) = com.antigravity.wifimanager.data.WifiCredentialKeys.parseStorageKey(key)
-                                        !storedSsid.trim().equals(ssid.trim(), ignoreCase = true)
-                                    }.toSet()
-                                    try {
-                                        val isRoot = withContext(Dispatchers.IO) { repository.isRootAvailable() }
-                                        if (isRoot) {
-                                            val isCurrent = connectionState.isConnected && connectionState.ssid.equals(ssid, ignoreCase = true)
-                                            if (isCurrent) {
-                                                connectionState = WifiConnectionState()
-                                            }
-                                            withContext(Dispatchers.IO) {
-                                                repository.forgetNetwork(ssid, bssid)
-                                            }
-                                            if (isCurrent) {
-                                                withContext(Dispatchers.IO) {
-                                                    val deadline = System.currentTimeMillis() + 6000L
-                                                    while (System.currentTimeMillis() < deadline) {
-                                                        if (repository.isWifiEnabled()) break
-                                                        Thread.sleep(150)
-                                                    }
-                                                }
-                                                kotlinx.coroutines.delay(1200)
-                                                refreshSystemNetworksAndWait(forceRefresh = true)
-                                            } else {
-                                                refreshSystemNetworksAndWait(forceRefresh = false)
-                                            }
-                                            ToastHelper.show(this@MainActivity, "Đã xóa và quên mạng '$ssid'")
-                                        } else {
-                                            withContext(Dispatchers.IO) {
-                                                repository.forgetNetwork(ssid, bssid)
-                                            }
-                                            ToastHelper.show(
-                                                this@MainActivity,
-                                                "Vui lòng chọn mạng '$ssid' và nhấn 'Quên mạng' trong Cài đặt sắp mở.",
-                                                ToastDuration.LONG
-                                            )
-                                            kotlinx.coroutines.delay(2000)
-                                            try {
-                                                val intent = Intent(android.provider.Settings.ACTION_WIFI_SETTINGS).apply {
-                                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                                                }
-                                                startActivity(intent)
-                                            } catch (e: Exception) {
-                                                e.printStackTrace()
-                                            }
-                                            refreshSystemNetworksAndWait(forceRefresh = false)
-                                        }
-                                    } finally {
-                                        isSavingPassword = false
-                                    }
-                                }
-                            },
-                            onOpenWifiSettings = {
-                                repository.openSystemWifiSettings()
-                            },
-                            onOpenWifiPanel = {
-                                repository.openSystemWifiPanel()
-                            }
-                        )
-                    }
-                    3 -> HistoryScreen(
+                    2 -> HistoryScreen(
                         historyLogs = historyLogs,
                         isClearingHistory = isClearingHistory,
                         onClearHistory = {
@@ -993,7 +800,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     )
-                    4 -> SettingsScreen(
+                    3 -> SettingsScreen(
                         threshold = threshold,
                         autoSwitchEnabled = autoSwitchEnabled,
                         prefer5GhzEnabled = prefer5GhzEnabled,

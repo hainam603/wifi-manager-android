@@ -4,6 +4,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import java.io.File
+import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -29,6 +30,8 @@ class SharedWifiOfflineStore(private val context: Context) {
 
     companion object {
         private val MAX_AGE_MS = 90L * 24 * 60 * 60 * 1000
+        /** Độ dài tối thiểu để khớp SSID theo tiền tố (giống WifiMaster). */
+        private const val MIN_SSID_PREFIX_MATCH_LEN = 5
     }
 
     private class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
@@ -301,49 +304,96 @@ class SharedWifiOfflineStore(private val context: Context) {
     }
 
     fun lookupCredential(ssid: String, bssid: String?): SharedWifiCredential? {
+        val trimmed = ssid.trim()
+        if (trimmed.isEmpty()) return null
+
         synchronized(lock) {
             val db = dbHelper.readableDatabase
             val bssidVal = bssid.orEmpty().lowercase()
-            db.rawQuery(
+            val ssidLower = trimmed.lowercase(Locale.getDefault())
+
+            // 1) Khớp chính xác SSID (ưu tiên đúng BSSID)
+            lookupCredentialFromQuery(
+                db,
                 """
-                SELECT * FROM ${DatabaseHelper.TABLE_NAME} 
-                WHERE ${DatabaseHelper.COL_SSID} = ? 
-                ORDER BY (${DatabaseHelper.COL_BSSID} = ?) DESC, ${DatabaseHelper.COL_CACHED_AT} DESC 
+                SELECT * FROM ${DatabaseHelper.TABLE_NAME}
+                WHERE lower(${DatabaseHelper.COL_SSID}) = ?
+                ORDER BY (${DatabaseHelper.COL_BSSID} = ?) DESC, ${DatabaseHelper.COL_CACHED_AT} DESC
                 LIMIT 1
                 """.trimIndent(),
-                arrayOf(ssid, bssidVal)
-            ).use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val colSsid = cursor.getColumnIndex(DatabaseHelper.COL_SSID)
-                    val colBssid = cursor.getColumnIndex(DatabaseHelper.COL_BSSID)
-                    val colPassword = cursor.getColumnIndex(DatabaseHelper.COL_PASSWORD)
-                    val colProvider = cursor.getColumnIndex(DatabaseHelper.COL_PROVIDER)
-                    val colLat = cursor.getColumnIndex(DatabaseHelper.COL_LAT)
-                    val colLng = cursor.getColumnIndex(DatabaseHelper.COL_LNG)
-                    val colCachedAt = cursor.getColumnIndex(DatabaseHelper.COL_CACHED_AT)
+                arrayOf(ssidLower, bssidVal)
+            )?.let { return it }
 
-                    val ssidRet = cursor.getString(colSsid)
-                    val password = cursor.getString(colPassword)
-                    val bssidRaw = cursor.getString(colBssid)
-                    val bssidRet = if (bssidRaw.isNullOrBlank()) null else bssidRaw
-                    val provider = cursor.getString(colProvider)
-                    val lat = if (cursor.isNull(colLat)) null else cursor.getDouble(colLat)
-                    val lng = if (cursor.isNull(colLng)) null else cursor.getDouble(colLng)
-                    val cachedAt = cursor.getLong(colCachedAt)
-
-                    return SharedWifiCredential(
-                        ssid = ssidRet,
-                        password = password,
-                        bssid = bssidRet,
-                        providerName = provider,
-                        latitude = lat,
-                        longitude = lng,
-                        cachedAtMs = cachedAt
+            // 2) Khớp SSID gần giống (tiền tố) — vd. VNPT-Guest@Wifi ↔ VNPT-Guest@Wifi-Unifi
+            if (ssidLower.length >= MIN_SSID_PREFIX_MATCH_LEN) {
+                lookupCredentialFromQuery(
+                    db,
+                    """
+                    SELECT * FROM ${DatabaseHelper.TABLE_NAME}
+                    WHERE length(${DatabaseHelper.COL_SSID}) >= ?
+                      AND (
+                        ? LIKE lower(${DatabaseHelper.COL_SSID}) || '%'
+                        OR lower(${DatabaseHelper.COL_SSID}) LIKE ? || '%'
+                      )
+                    ORDER BY
+                      (lower(${DatabaseHelper.COL_SSID}) = ?) DESC,
+                      length(${DatabaseHelper.COL_SSID}) DESC,
+                      (${DatabaseHelper.COL_BSSID} = ?) DESC,
+                      ${DatabaseHelper.COL_CACHED_AT} DESC
+                    LIMIT 1
+                    """.trimIndent(),
+                    arrayOf(
+                        MIN_SSID_PREFIX_MATCH_LEN.toString(),
+                        ssidLower,
+                        ssidLower,
+                        ssidLower,
+                        bssidVal
                     )
-                }
+                )?.let { return it }
             }
+
             return null
         }
+    }
+
+    private fun lookupCredentialFromQuery(
+        db: SQLiteDatabase,
+        sql: String,
+        args: Array<String>
+    ): SharedWifiCredential? {
+        db.rawQuery(sql, args).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            return readCredentialFromCursor(cursor)
+        }
+    }
+
+    private fun readCredentialFromCursor(cursor: android.database.Cursor): SharedWifiCredential {
+        val colSsid = cursor.getColumnIndex(DatabaseHelper.COL_SSID)
+        val colBssid = cursor.getColumnIndex(DatabaseHelper.COL_BSSID)
+        val colPassword = cursor.getColumnIndex(DatabaseHelper.COL_PASSWORD)
+        val colProvider = cursor.getColumnIndex(DatabaseHelper.COL_PROVIDER)
+        val colLat = cursor.getColumnIndex(DatabaseHelper.COL_LAT)
+        val colLng = cursor.getColumnIndex(DatabaseHelper.COL_LNG)
+        val colCachedAt = cursor.getColumnIndex(DatabaseHelper.COL_CACHED_AT)
+
+        val ssidRet = cursor.getString(colSsid)
+        val password = cursor.getString(colPassword)
+        val bssidRaw = cursor.getString(colBssid)
+        val bssidRet = if (bssidRaw.isNullOrBlank()) null else bssidRaw
+        val provider = cursor.getString(colProvider)
+        val lat = if (cursor.isNull(colLat)) null else cursor.getDouble(colLat)
+        val lng = if (cursor.isNull(colLng)) null else cursor.getDouble(colLng)
+        val cachedAt = cursor.getLong(colCachedAt)
+
+        return SharedWifiCredential(
+            ssid = ssidRet,
+            password = password,
+            bssid = bssidRet,
+            providerName = provider,
+            latitude = lat,
+            longitude = lng,
+            cachedAtMs = cachedAt
+        )
     }
 
     private fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {

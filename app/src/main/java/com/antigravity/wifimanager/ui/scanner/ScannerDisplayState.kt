@@ -62,8 +62,10 @@ object ScannerUiMapper {
         resolvePassword: (ssid: String, bssid: String?) -> String? = { _, _ -> null },
         resolveSimilarPassword: (ssid: String) -> Pair<String, String>? = { null }
     ): ScannerDisplayState {
+        val connectableNetworks = networks.filter { it.isScannerConnectable() }
         val connectedSsid = resolveConnectedSsid(connection)
-        val connectedAp = resolveConnectedAp(networks, connection, connectedSsid)
+        val connectedAp = resolveConnectedAp(connectableNetworks, connection, connectedSsid)
+            ?: resolveConnectedAp(networks, connection, connectedSsid)
 
         fun pickBestPerSsid(input: List<WifiApInfo>): List<WifiApInfo> {
             if (input.isEmpty()) return emptyList()
@@ -98,15 +100,12 @@ object ScannerUiMapper {
             )
         }
 
-        val savedRows = pickBestPerSsid(networks)
-            .filter { it.ssid != connectedSsid && it.isSaved }
+        val savedRows = pickBestPerSsid(connectableNetworks)
+            .filter { it.ssid != connectedSsid }
             .sortedWith(wifiApComparator)
             .map { rowModel(it, isNearbyGroup = false) }
 
-        val nearbyRows = pickBestPerSsid(networks)
-            .filter { it.ssid != connectedSsid && !it.isSaved }
-            .sortedWith(wifiApComparator)
-            .map { rowModel(it, isNearbyGroup = true) }
+        val nearbyRows = emptyList<ScannerApRowModel>()
 
         val connectedRow = connectedAp?.let { rowModel(it, isNearbyGroup = false) }
 

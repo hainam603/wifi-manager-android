@@ -42,6 +42,7 @@ fun ScannerScreen(
     networkCount: Int,
     scanStatusText: String,
     isScanning: Boolean = false,
+    isRealtimeScanning: Boolean = false,
     connectingApKey: String? = null,
     connectFailedApKeys: Set<String> = emptySet(),
     rootConnectAvailable: Boolean = true,
@@ -53,7 +54,6 @@ fun ScannerScreen(
     onConnectNetwork: (ssid: String, bssid: String, password: String?) -> Unit,
     onHasSystemCredential: (String) -> Boolean,
     onGetSavedPassword: (String, String?) -> String?,
-    onSavePassword: (String, String, String?) -> Unit,
     onRemovePassword: (String, String?) -> Unit,
     onResolvePassword: (String, String?) -> String?,
     onRefreshPasswordForBssid: suspend (String, String) -> WifiCredentialRefreshResult
@@ -127,14 +127,18 @@ fun ScannerScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Tìm thấy ${effectiveDisplayState.totalRowCount()} mạng WiFi",
+                text = "Có thể kết nối: ${effectiveDisplayState.totalRowCount()} mạng",
                 fontSize = 13.sp,
                 color = TextSecondary
             )
             Text(
-                text = if (isScanning) "Đang quét WiFi và tải dữ liệu cộng đồng..." else scanStatusText,
+                text = when {
+                    isScanning -> "Đang quét WiFi và tải dữ liệu cộng đồng..."
+                    isRealtimeScanning -> "Đang quét realtime · $scanStatusText"
+                    else -> scanStatusText
+                },
                 fontSize = 12.sp,
-                color = TextSecondary
+                color = if (isRealtimeScanning && !isScanning) WifiGood else TextSecondary
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -189,7 +193,7 @@ fun ScannerScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "Không tìm thấy mạng WiFi nào có mật khẩu",
+                            text = "Không có mạng WiFi nào có thể kết nối",
                             color = TextSecondary,
                             fontSize = 14.sp
                         )
@@ -278,6 +282,14 @@ fun ScannerScreen(
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(text = activeSsid)
+                        if (!rootConnectAvailable) {
+                            Text(
+                                text = "Cần quyền Root để kết nối — mật khẩu chỉ được lưu sau khi kết nối thành công.",
+                                fontSize = 12.sp,
+                                color = WifiWeak,
+                                lineHeight = 16.sp
+                            )
+                        }
                         OutlinedTextField(
                             value = passwordInput,
                             onValueChange = { passwordInput = it },
@@ -298,36 +310,31 @@ fun ScannerScreen(
                 },
                 confirmButton = {
                     TextButton(
-                        enabled = connectingApKey == null && !isPasswordBusy,
+                        enabled = connectingApKey == null && !isPasswordBusy && rootConnectAvailable,
                         onClick = {
-                            onSavePassword(activeSsid, passwordInput, activeBssid)
-                            if (rootConnectAvailable) {
-                                onConnectNetwork(
-                                    activeSsid,
-                                    passwordDialogBssid ?: "02:00:00:00:00:00",
-                                    passwordInput
-                                )
+                            if (!rootConnectAvailable) {
+                                coroutineScope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        "Cần Root để kết nối — mật khẩu chỉ lưu khi kết nối thành công."
+                                    )
+                                }
+                                return@TextButton
                             }
+                            onConnectNetwork(
+                                activeSsid,
+                                passwordDialogBssid ?: "02:00:00:00:00:00",
+                                passwordInput
+                            )
                             passwordDialogSsid = null
                             passwordDialogBssid = null
                         }
                     ) {
-                        if (isPasswordBusy) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(text = "Đang lưu...")
-                        } else {
-                            Text(
-                                when {
-                                    !rootConnectAvailable -> "Lưu mật khẩu"
-                                    savedPassword.isNullOrEmpty() -> "Kết nối"
-                                    else -> "Cập nhật"
-                                }
-                            )
-                        }
+                        Text(
+                            when {
+                                savedPassword.isNullOrEmpty() -> "Kết nối"
+                                else -> "Cập nhật & kết nối"
+                            }
+                        )
                     }
                 },
                 dismissButton = {
@@ -418,7 +425,7 @@ private fun ScannerNetworkList(
         if (savedRows.isNotEmpty()) {
             item(key = "header_saved", contentType = "header") {
                 Text(
-                    text = "Mạng Wi-Fi",
+                    text = "Có thể kết nối",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextSecondary,
@@ -634,7 +641,7 @@ private fun WifiApRow(
                 }
 
                 Spacer(modifier = Modifier.height(4.dp))
-                
+
                 Text(
                     text = "BSSID: ${ap.bssid}",
                     fontSize = 11.sp,
@@ -758,7 +765,6 @@ private fun WifiApRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // Mức sóng %
                 Text(
                     text = "${ap.signalPercent}%",
                     fontSize = 18.sp,

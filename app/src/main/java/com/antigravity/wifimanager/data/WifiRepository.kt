@@ -190,9 +190,6 @@ class WifiRepository(private val context: Context) {
             }
         }
 
-        // Tự động thêm mạng đang kết nối thành công vào danh sách mạng tin cậy để đề xuất
-        addAllowedSsid(ssid)
-
         val frequencyMhz = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 finalWifiInfo.frequency
@@ -705,6 +702,10 @@ class WifiRepository(private val context: Context) {
         return set.contains(ssid)
     }
 
+    /**
+     * Lưu mật khẩu sau khi đã xác minh kết nối thành công ([connectToNetwork] success)
+     * hoặc đồng bộ từ hệ thống (HasEverConnected). Không gọi trước khi biết kết quả kết nối.
+     */
     fun saveWifiPassword(ssid: String, password: String, bssid: String? = null) {
         if (ssid.isBlank()) return
         if (!WifiCredentialKeys.isPlausibleWifiPassword(password, bssid)) return
@@ -974,9 +975,10 @@ class WifiRepository(private val context: Context) {
         return emptyMap()
     }
 
-    /** Chỉ tin mạng hệ thống đã từng kết nối thành công (hoặc do app quản lý). */
+    /** Chỉ tin mạng hệ thống đã từng kết nối thành công qua app hoặc HasEverConnected trên OS. */
     private fun shouldTrustSystemSavedSsid(ssid: String, configs: Map<String, SystemWifiConfig>): Boolean {
-        if (hasSavedWifiPassword(ssid) || isAppManaged(ssid) || isSystemConnectedSsid(ssid)) return true
+        if (isSystemConnectedSsid(ssid)) return true
+        if (hasSavedWifiPassword(ssid)) return true
         val cfg = configs[ssid] ?: return false
         return cfg.hasEverConnected
     }
@@ -1008,8 +1010,12 @@ class WifiRepository(private val context: Context) {
         fromConfigured.forEach { ssid ->
             if (shouldTrustSystemSavedSsid(ssid, rootConfigs)) {
                 addAllowedSsid(ssid)
-            } else if (!hasSavedWifiPassword(ssid) && !isAppManaged(ssid)) {
+            } else {
                 removeAllowedSsid(ssid)
+                if (isAppManaged(ssid) && !isSystemConnectedSsid(ssid)) {
+                    forgetNetworkFromSystemViaRoot(ssid)
+                    unmarkAppManaged(ssid)
+                }
             }
         }
 
@@ -1051,12 +1057,26 @@ class WifiRepository(private val context: Context) {
     // Đọc ngay từ wifiManager.scanResults (OS cache) — không blocking, không delay.
     // forceRefresh=true: trigger startScan() để OS làm mới lần sau, nhưng trả về ngay kết quả hiện tại.
     // Kết quả mới nhất sẽ được cập nhật qua SCAN_RESULTS_AVAILABLE_ACTION broadcast trong WifiMonitorService.
+  /** Yêu cầu OS quét WiFi — kết quả đến qua [WifiManager.SCAN_RESULTS_AVAILABLE_ACTION]. */
     @SuppressLint("MissingPermission")
-    fun scanNearbyNetworks(forceRefresh: Boolean = false): List<WifiApInfo> {
+    fun requestWifiScan(): Boolean {
+        return try {
+            @Suppress("DEPRECATION")
+            wifiManager.startScan()
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun scanNearbyNetworks(forceRefresh: Boolean = false, ignoreAppCache: Boolean = false): List<WifiApInfo> {
         try {
             val now = System.currentTimeMillis()
             // Dùng app cache nếu còn hiệu lực và không force
-            if (!forceRefresh && lastScanResults.isNotEmpty() && (now - lastScanAtMs) < SCAN_CACHE_WINDOW_MS) {
+            if (!forceRefresh && !ignoreAppCache &&
+                lastScanResults.isNotEmpty() && (now - lastScanAtMs) < SCAN_CACHE_WINDOW_MS
+            ) {
                 lastScanUsedCache = true
                 val current = getCurrentConnectionState()
                 val systemSaved = readSystemSavedSsids()
@@ -1146,85 +1166,6 @@ class WifiRepository(private val context: Context) {
             return lastScanResults
         }
     }
-
-    /**
-     * Quét WiFi hệ thống thuần tuý, không kết hợp dữ liệu chia sẻ cộng đồng/API.
-     * Trả về danh sách các mạng chỉ với thông tin từ hệ thống.
-     */
-    @SuppressLint("MissingPermission")
-    fun scanSystemOnly(forceRefresh: Boolean = false): List<WifiApInfo> {
-        try {
-            if (forceRefresh) {
-                @Suppress("DEPRECATION")
-                wifiManager.startScan()
-            }
-
-            @Suppress("DEPRECATION")
-            val rawResults = wifiManager.scanResults.orEmpty()
-            val current = getCurrentConnectionState()
-            val systemSaved = readSystemSavedSsids()
-
-            return rawResults
-                .filter { !it.SSID.isNullOrEmpty() }
-                .map {
-                    val percent = calculateSignalPercent(it.level)
-                    val isSaves = systemSaved.contains(it.SSID) || isSsidAllowed(it.SSID)
-                    val hasStored = hasSavedWifiPassword(it.SSID, it.BSSID) || systemSaved.contains(it.SSID)
-                    val isSecured = it.capabilities.contains("WPA", ignoreCase = true) ||
-                            it.capabilities.contains("SAE", ignoreCase = true) ||
-                            it.capabilities.contains("PSK", ignoreCase = true)
-                    
-                    WifiApInfo(
-                        ssid = it.SSID,
-                        bssid = it.BSSID,
-                        signalPercent = percent,
-                        frequencyMhz = it.frequency,
-                        isSaved = isSaves,
-                        hasStoredPassword = hasStored,
-                        securityType = it.capabilities ?: "Open",
-                        isReadyToConnect = hasStored || !isSecured
-                    )
-                }
-                .sortedWith(
-                    compareByDescending<WifiApInfo> { current.isConnected && ssidsMatch(current.ssid, it.ssid) }
-                        .thenByDescending { it.isSaved }
-                        .thenByDescending { it.signalPercent }
-                        .thenByDescending { it.is5GHz }
-                        .thenBy { it.ssid.lowercase(Locale.getDefault()) }
-                )
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return emptyList()
-        }
-    }
-
-    fun openSystemWifiSettings() {
-        try {
-            val intent = android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS).apply {
-                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    fun openSystemWifiPanel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                val intent = android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI).apply {
-                    flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                context.startActivity(intent)
-            } catch (e: Exception) {
-                openSystemWifiSettings()
-            }
-        } else {
-            openSystemWifiSettings()
-        }
-    }
-
-
 
     // Đăng ký danh sách gợi ý mạng với Android để tự động kết nối khi sóng mạng hiện tại yếu
     fun suggestNetworks(ssids: List<String>): Boolean {
@@ -1461,7 +1402,7 @@ class WifiRepository(private val context: Context) {
             )
         }
 
-        val existedInSystemBefore = readSystemSavedSsids().contains(ssid)
+        markAppManaged(ssid)
         connectToSsidViaRoot(ssid, psk, securityHint)
 
         return if (waitUntilConnectedTo(ssid, timeoutMs = 12_000)) {
@@ -1475,9 +1416,6 @@ class WifiRepository(private val context: Context) {
                 message = "Kết nối thành công: $ssid"
             )
         } else {
-            if (!existedInSystemBefore) {
-                forgetNetworkFromSystemViaRoot(ssid)
-            }
             val attemptedPassword = psk.orEmpty()
             val fromSharedApi = attemptedPassword.isNotBlank() &&
                 sharedWifiRepository.matchesSharedApiPassword(
@@ -1486,28 +1424,53 @@ class WifiRepository(private val context: Context) {
                     attemptedPassword,
                     this
                 )
-            if (fromSharedApi) {
-                val rejectPassword = sharedCred?.password ?: sharedApiPassword ?: attemptedPassword
-                sharedWifiRepository.markPasswordRejected(
-                    ssid,
-                    bssid ?: sharedCred?.bssid,
-                    rejectPassword
-                )
-                if (getSavedWifiPassword(ssid, bssid ?: sharedCred?.bssid) == attemptedPassword) {
-                    removeSavedWifiPassword(ssid, bssid ?: sharedCred?.bssid)
-                }
-            }
+            cleanupAfterFailedConnection(ssid, bssid, attemptedPassword, sharedCred, fromSharedApi)
             ConnectResult(
                 success = false,
                 message = if (fromSharedApi) {
                     "Kết nối thất bại: $ssid\n" +
-                        "Mật khẩu API không đúng — sẽ không thử lại cho đến khi API cập nhật mật khẩu mới."
+                        "Mật khẩu API không đúng — đã gỡ khỏi mạng đã lưu."
                 } else {
                     "Kết nối thất bại: $ssid\n" +
-                        "Có thể mật khẩu đã đổi hoặc sóng quá yếu. Thử lại hoặc sửa mật khẩu (icon bút)."
+                        "Đã gỡ khỏi mạng đã lưu. Thử lại hoặc sửa mật khẩu (icon bút)."
                 }
             )
         }
+    }
+
+    /**
+     * Kết nối thất bại → gỡ profile khỏi Cài đặt WiFi (Mạng đã lưu) và dữ liệu app.
+     * Giữ mạng nếu vẫn đang kết nối ổn định và đã từng kết nối thành công trước đó.
+     */
+    private fun cleanupAfterFailedConnection(
+        ssid: String,
+        bssid: String?,
+        attemptedPassword: String,
+        sharedCred: SharedWifiCredential?,
+        fromSharedApi: Boolean
+    ) {
+        if (fromSharedApi) {
+            val rejectPassword = sharedCred?.password ?: attemptedPassword
+            sharedWifiRepository.markPasswordRejected(
+                ssid,
+                bssid ?: sharedCred?.bssid,
+                rejectPassword
+            )
+            if (getSavedWifiPassword(ssid, bssid ?: sharedCred?.bssid) == rejectPassword) {
+                removeSavedWifiPassword(ssid, bssid ?: sharedCred?.bssid)
+            }
+        }
+
+        val state = getCurrentConnectionState()
+        val stillOnVerifiedTarget = state.isConnected &&
+            ssidsMatch(state.ssid, ssid) &&
+            isSystemConnectedSsid(ssid)
+
+        if (stillOnVerifiedTarget) {
+            return
+        }
+
+        forgetNetwork(ssid, bssid)
     }
 
     private fun requiresPasswordFromHint(securityHint: String?): Boolean {
@@ -1533,6 +1496,8 @@ class WifiRepository(private val context: Context) {
         val set = prefs.getStringSet(KEY_SYSTEM_CONNECTED_SSIDS, emptySet())?.toMutableSet() ?: mutableSetOf()
         set.add(ssid)
         prefs.edit().putStringSet(KEY_SYSTEM_CONNECTED_SSIDS, set).apply()
+        addAllowedSsid(ssid)
+        markAppManaged(ssid)
     }
 
     /** Gỡ profile WiFi hệ thống do lần thử kết nối vừa tạo (khi thất bại). */

@@ -35,6 +35,24 @@ data class WifiApInfo(
 ) {
     val is5GHz: Boolean
         get() = frequencyMhz >= 4900
+
+    fun isOpenSecurity(): Boolean {
+        val sec = securityType
+        return !sec.contains("WPA", ignoreCase = true) &&
+            !sec.contains("WEP", ignoreCase = true) &&
+            !sec.contains("SAE", ignoreCase = true) &&
+            !sec.contains("PSK", ignoreCase = true) &&
+            !sec.contains("EAP", ignoreCase = true)
+    }
+
+    /** Hiển thị trên tab Quét WiFi — chỉ mạng thực sự kết nối được. */
+    fun isScannerConnectable(): Boolean {
+        if (isSharedPasswordRejected) return false
+        if (isReadyToConnect) return true
+        if (isOpenSecurity()) return true
+        if (!sharedPasswordFromApi.isNullOrBlank()) return true
+        return hasStoredPassword
+    }
 }
 
 enum class RootStatus {
