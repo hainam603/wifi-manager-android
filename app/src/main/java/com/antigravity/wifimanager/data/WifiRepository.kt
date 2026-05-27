@@ -15,6 +15,10 @@ import java.net.Inet4Address
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 class WifiRepository(private val context: Context) {
 
@@ -43,11 +47,27 @@ class WifiRepository(private val context: Context) {
         private const val KEY_LAST_SWITCH_AT_MS = "last_switch_at_ms"
         private const val KEY_AUTO_UPDATE_INTERVAL_DAYS = "offline_auto_update_interval_days"
         private const val KEY_LAST_AUTO_UPDATE_MS = "offline_last_auto_update_ms"
+        private const val KEY_GEMINI_API_KEY = "gemini_api_key"
+        private const val KEY_GEMINI_AI_ENABLED = "gemini_ai_enabled"
+        private const val KEY_GEMINI_AUTO_PILOT = "gemini_auto_pilot"
+        private const val KEY_SPLIT_DNS_ENABLED = "split_dns_enabled"
         const val SCAN_CACHE_WINDOW_MS = 30_000L
         const val SYSTEM_PASSWORD_SYNC_WINDOW_MS = 120_000L
         const val SWITCH_COOLDOWN_MS = 60_000L
         const val DEFAULT_AUTO_UPDATE_INTERVAL_DAYS = 1
     }
+
+    fun isSplitDnsEnabled(): Boolean = prefs.getBoolean(KEY_SPLIT_DNS_ENABLED, false)
+    fun setSplitDnsEnabled(value: Boolean) = prefs.edit().putBoolean(KEY_SPLIT_DNS_ENABLED, value).apply()
+
+    fun getGeminiApiKey(): String = prefs.getString(KEY_GEMINI_API_KEY, "") ?: ""
+    fun setGeminiApiKey(value: String) = prefs.edit().putString(KEY_GEMINI_API_KEY, value).apply()
+
+    fun isGeminiAiEnabled(): Boolean = prefs.getBoolean(KEY_GEMINI_AI_ENABLED, true)
+    fun setGeminiAiEnabled(value: Boolean) = prefs.edit().putBoolean(KEY_GEMINI_AI_ENABLED, value).apply()
+
+    fun isGeminiAutoPilotEnabled(): Boolean = prefs.getBoolean(KEY_GEMINI_AUTO_PILOT, false)
+    fun setGeminiAutoPilotEnabled(value: Boolean) = prefs.edit().putBoolean(KEY_GEMINI_AUTO_PILOT, value).apply()
 
     fun isMonitoringEnabled(): Boolean = prefs.getBoolean(KEY_MONITORING_ENABLED, true)
 
@@ -1263,6 +1283,132 @@ class WifiRepository(private val context: Context) {
             arr.put(obj)
         }
         prefs.edit().putString(KEY_HISTORY, arr.toString()).apply()
+
+        // AI Auto-Pilot: Tự động chẩn đoán ngầm và tự động sửa lỗi tức thì
+        if (!log.isSuccess && isGeminiAutoPilotEnabled()) {
+            triggerAutoPilotFix(log)
+        }
+    }
+
+    private fun triggerAutoPilotFix(log: SwitchLog) {
+        val apiKey = getGeminiApiKey()
+        if (apiKey.isBlank() || !isGeminiAiEnabled()) return
+
+        CoroutineScope(Dispatchers.IO).launch {
+            android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Phát hiện lỗi kết nối tới '${log.toSsid}'. Đang chẩn đoán ngầm...")
+            try {
+                val rawResult = GeminiAiManager.diagnoseSwitchFailure(
+                    apiKey = apiKey,
+                    log = log,
+                    hasRoot = isRootAvailable()
+                )
+                
+                // Parse action tag từ Gemini AI
+                val lines = rawResult.lines()
+                val lastLine = lines.lastOrNull()?.trim() ?: ""
+                if (lastLine.startsWith("[ACTION:") && lastLine.endsWith("]")) {
+                    val actionBody = lastLine.removePrefix("[ACTION:").removeSuffix("]").trim()
+                    val parts = actionBody.split("|")
+                    val type = parts.getOrNull(0)?.trim()
+                    val arg = parts.getOrNull(1)?.trim() ?: ""
+                    
+                    if (type != null && type != "NONE") {
+                        android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Nhận diện hành động sửa lỗi: '$type' cho '${log.toSsid}'...")
+                        executeAutoPilotAction(type, arg)
+                    } else {
+                        android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Không có hành động sửa lỗi phù hợp.")
+                    }
+                }
+                Unit
+            } catch (e: Exception) {
+                android.util.Log.e("WifiRepository", "🤖 AI Auto-Pilot: Lỗi chẩn đoán ngầm", e)
+            }
+        }
+    }
+
+    private suspend fun executeAutoPilotAction(type: String, arg: String) {
+        when (type) {
+            "BYPASS_CAPTIVE" -> {
+                android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Thực thi vượt cổng chào tự động cho '$arg'...")
+                val redirectUrl = CaptivePortalBypasser.detectRedirectUrl(context)
+                if (!redirectUrl.isNullOrBlank()) {
+                    val result = CaptivePortalBypasser.attemptAutoBypass(context, redirectUrl)
+                    if (result.success) {
+                        android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Vượt cổng chào thành công!")
+                        val sdf = SimpleDateFormat("HH:mm:ss dd/MM/yyyy", Locale.getDefault())
+                        addHistoryLog(
+                            SwitchLog(
+                                timestamp = sdf.format(Date()),
+                                fromSsid = "",
+                                fromSignal = 0,
+                                toSsid = arg,
+                                toSignal = 100,
+                                isSuccess = true,
+                                connectionStatus = "🤖 AI Auto-Pilot tự động vượt cổng chào '${result.portalName}' thành công!"
+                            )
+                        )
+                    } else {
+                        android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Vượt cổng chào thất bại: ${result.message}")
+                    }
+                }
+            }
+            "TRY_COMMON_PASSWORDS" -> {
+                android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Đang tự động thử mật khẩu phổ biến cho '$arg'...")
+                val commonPasswords = mutableListOf(
+                    "12345678", "88888888", "99999999", "00000000", "11111111", 
+                    "wifichua", "matkhau123", "dangnhap", "vietnam123", "haiphong123"
+                )
+                val cleanSsid = arg.lowercase(Locale.getDefault()).replace(" ", "").replace("\"", "")
+                if (cleanSsid.isNotBlank()) {
+                    commonPasswords.add(0, cleanSsid)
+                    commonPasswords.add(1, cleanSsid + "123")
+                    commonPasswords.add(2, cleanSsid + "vn")
+                    commonPasswords.add(3, cleanSsid + "@123")
+                }
+
+                var success = false
+                var matchedPassword = ""
+
+                for (pass in commonPasswords.distinct()) {
+                    android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Thử pass '$pass'...")
+                    val result = connectToNetwork(ssid = arg, password = pass)
+                    if (result.success) {
+                        success = true
+                        matchedPassword = pass
+                        break
+                    }
+                    kotlinx.coroutines.delay(1200)
+                }
+
+                if (success) {
+                    saveWifiPassword(arg, matchedPassword)
+                    android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Tự động dò được pass '$matchedPassword' cho '$arg'!")
+                    val sdf = SimpleDateFormat("HH:mm:ss dd/MM/yyyy", Locale.getDefault())
+                    addHistoryLog(
+                        SwitchLog(
+                            timestamp = sdf.format(Date()),
+                            fromSsid = "",
+                            fromSignal = 0,
+                            toSsid = arg,
+                            toSignal = 100,
+                            isSuccess = true,
+                            connectionStatus = "🤖 AI Auto-Pilot tự động kết nối thành công với mật khẩu: '$matchedPassword'!"
+                        )
+                    )
+                } else {
+                    android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Không tìm thấy mật khẩu phổ biến phù hợp.")
+                }
+            }
+            "SWITCH_TO_BETTER_WIFI" -> {
+                android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: WiFi kết nối nhưng không có Internet. Tự động chuyển mạng khác...")
+                val autoSwitcher = WifiAutoSwitcher(this)
+                val result = autoSwitcher.attemptSwitch(
+                    currentState = getCurrentConnectionState(),
+                    enforceCooldown = false
+                )
+                android.util.Log.d("WifiRepository", "🤖 AI Auto-Pilot: Kết quả chuyển mạng tự động: ${result.userMessage}")
+            }
+        }
     }
 
     fun clearHistory() {
@@ -1384,6 +1530,7 @@ class WifiRepository(private val context: Context) {
     }
 
     /** Kết nối im lặng (không hộp thoại): chỉ ROOT + xác minh kết quả. */
+    /** Kết nối im lặng (không hộp thoại): chỉ ROOT + xác minh kết quả. */
     fun connectToNetwork(
         ssid: String,
         password: String? = null,
@@ -1422,7 +1569,7 @@ class WifiRepository(private val context: Context) {
         onProgress?.invoke("Đang khởi tạo cấu hình & kết nối qua root...")
         connectToSsidViaRoot(ssid, psk, securityHint)
 
-        return if (waitUntilConnectedTo(ssid, timeoutMs = 12_000, onProgress = onProgress)) {
+        return if (waitUntilConnectedTo(ssid, timeoutMs = 25_000, onProgress = onProgress)) {
             if (!psk.isNullOrBlank()) {
                 saveWifiPassword(ssid, psk, bssid)
             }
@@ -1442,9 +1589,13 @@ class WifiRepository(private val context: Context) {
                     this
                 )
             cleanupAfterFailedConnection(ssid, bssid, attemptedPassword, sharedCred, fromSharedApi)
+            
+            val isSecurityOpen = !requiresPasswordFromHint(securityHint)
             ConnectResult(
                 success = false,
-                message = if (fromSharedApi) {
+                message = if (isSecurityOpen) {
+                    "Kết nối thất bại: $ssid. Mạng không yêu cầu mật khẩu bảo mật nhưng không có kết nối Internet hoặc cần xác thực trang chào (Captive Portal)."
+                } else if (fromSharedApi) {
                     "Kết nối thất bại: $ssid\n" +
                         "Mật khẩu API không đúng — đã gỡ khỏi mạng đã lưu."
                 } else {
@@ -1452,6 +1603,26 @@ class WifiRepository(private val context: Context) {
                         "Đã gỡ khỏi mạng đã lưu. Thử lại hoặc sửa mật khẩu (icon bút)."
                 }
             )
+        }
+    }
+
+    private fun forgetSystemNetworkOnly(ssid: String) {
+        if (ssid.isBlank() || !isRootAvailable()) return
+        try {
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "cmd wifi list-networks"))
+            val stdout = process.inputStream.bufferedReader().use { it.readText() }
+            process.waitFor()
+            val lines = stdout.split("\n")
+            for (line in lines) {
+                val parsed = parseSystemNetworkLine(line) ?: continue
+                val parsedSsid = parsed.second
+                val networkId = parsed.first
+                if (parsedSsid.equals(ssid, ignoreCase = true) && networkId != null) {
+                    execRootShellScript("cmd wifi forget-network $networkId")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("WifiRepository", "Error removing system network profile", e)
         }
     }
 
@@ -1487,7 +1658,14 @@ class WifiRepository(private val context: Context) {
             return
         }
 
-        forgetNetwork(ssid, bssid)
+        if (fromSharedApi) {
+            forgetNetwork(ssid, bssid)
+        } else {
+            // Mật khẩu tự nhập: Chỉ gỡ cấu hình hệ thống bằng root (để tránh rác profile hệ thống khi kết nối lỗi)
+            // nhưng giữ lại mật khẩu lưu trong app (không gọi forgetNetwork)
+            removeSuggestionForSsid(ssid)
+            forgetSystemNetworkOnly(ssid)
+        }
     }
 
     private fun requiresPasswordFromHint(securityHint: String?): Boolean {

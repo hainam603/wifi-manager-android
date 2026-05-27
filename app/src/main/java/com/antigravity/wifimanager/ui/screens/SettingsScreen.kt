@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudSync
@@ -56,6 +57,10 @@ fun SettingsScreen(
     autoUpdateIntervalDays: Int,
     lastAutoUpdateMs: Long,
     isAutoUpdating: Boolean,
+    geminiApiKey: String,
+    geminiAiEnabled: Boolean,
+    geminiAutoPilotEnabled: Boolean,
+    isTestingGemini: Boolean,
     onThresholdChange: (Int) -> Unit,
     onAutoSwitchToggle: (Boolean) -> Unit,
     onPrefer5GhzToggle: (Boolean) -> Unit,
@@ -72,6 +77,12 @@ fun SettingsScreen(
     onRequestBatteryExemption: () -> Unit,
     onAutoUpdateIntervalChange: (Int) -> Unit,
     onTriggerManualUpdate: () -> Unit,
+    onGeminiApiKeyChange: (String) -> Unit,
+    onGeminiAiToggle: (Boolean) -> Unit,
+    onGeminiAutoPilotToggle: (Boolean) -> Unit,
+    onTestGeminiConnection: () -> Unit,
+    splitDnsEnabled: Boolean,
+    onSplitDnsToggle: (Boolean) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -657,6 +668,219 @@ fun SettingsScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Đồng bộ ngay bây giờ", color = Color.Black, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+
+        GlassCard(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .background(CyberEmerald.copy(alpha = 0.1f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Security,
+                            contentDescription = null,
+                            tint = CyberEmerald,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Text(
+                        text = "VƯỢT CHẶN TRANG WEB (SPLIT DNS)",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = CyberEmerald,
+                        letterSpacing = 1.sp
+                    )
+                }
+
+                Divider(color = Color(0x0CFFFFFF))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Bypass chặn Facebook/Messenger",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Tự động phân tách DNS (Split DNS): Định tuyến Facebook/Messenger qua DNS sạch bên ngoài, trong khi vẫn giữ DNS của công ty để bạn làm việc và truy cập mạng nội bộ bình thường.",
+                            fontSize = 11.sp,
+                            color = TextSecondary,
+                            lineHeight = 15.sp
+                        )
+                    }
+                    Switch(
+                        checked = splitDnsEnabled,
+                        onCheckedChange = onSplitDnsToggle,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = CyberEmerald
+                        )
+                    )
+                }
+            }
+        }
+
+        GlassCard(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .background(CyberRose.copy(alpha = 0.1f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = CyberRose,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Text(
+                        text = "TRỢ LÝ TRÍ TUỆ NHÂN TẠO (AI)",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = CyberRose,
+                        letterSpacing = 1.sp
+                    )
+                }
+
+                Divider(color = Color(0x0CFFFFFF))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Trợ lý Chẩn đoán Lỗi AI",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Tự động phân tích và đưa ra giải pháp khắc phục bằng tiếng Việt khi chuyển đổi WiFi thất bại.",
+                            fontSize = 11.sp,
+                            color = TextSecondary,
+                            lineHeight = 15.sp
+                        )
+                    }
+                    Switch(
+                        checked = geminiAiEnabled,
+                        onCheckedChange = onGeminiAiToggle,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = CyberRose
+                        )
+                    )
+                }
+
+                if (geminiAiEnabled) {
+                    Divider(color = Color(0x0CFFFFFF))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "AI Sửa Lỗi Tự Động (Auto-Pilot)",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "Cho phép AI tự chẩn đoán ngầm và kích hoạt sửa lỗi tức thì (vượt cổng chào, thử mật khẩu phổ biến hoặc chuyển mạng dự phòng) khi gặp sự cố, không cần bạn bấm tay.",
+                                fontSize = 11.sp,
+                                color = TextSecondary,
+                                lineHeight = 15.sp
+                            )
+                        }
+                        Switch(
+                            checked = geminiAutoPilotEnabled,
+                            onCheckedChange = onGeminiAutoPilotToggle,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = CyberRose
+                            )
+                        )
+                    }
+
+                    Divider(color = Color(0x0CFFFFFF))
+
+                    OutlinedTextField(
+                        value = geminiApiKey,
+                        onValueChange = onGeminiApiKeyChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Gemini API Key") },
+                        placeholder = { Text("Nhập API Key từ Google AI Studio...") },
+                        singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CyberRose,
+                            focusedLabelColor = CyberRose,
+                            unfocusedBorderColor = Color(0x1AFFFFFF),
+                            unfocusedLabelColor = TextSecondary,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        )
+                    )
+
+                    Text(
+                        text = "Lưu ý: API Key được lưu an toàn trên máy của bạn. Bạn có thể lấy Key miễn phí tại Google AI Studio.",
+                        fontSize = 11.sp,
+                        color = TextSecondary,
+                        lineHeight = 15.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Button(
+                        onClick = onTestGeminiConnection,
+                        colors = ButtonDefaults.buttonColors(containerColor = CyberRose),
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = geminiApiKey.isNotBlank() && !isTestingGemini
+                    ) {
+                        if (isTestingGemini) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Đang kiểm tra kết nối...", color = Color.White)
+                        } else {
+                            Text("Kiểm tra kết nối API Key", color = Color.White, fontWeight = FontWeight.Bold)
                         }
                     }
                 }

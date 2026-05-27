@@ -1,6 +1,9 @@
 package com.antigravity.wifimanager.data
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.Build
 import android.util.Log
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -25,15 +28,83 @@ object CaptivePortalBypasser {
         val message: String
     )
 
+    private fun getWifiNetwork(context: Context): android.net.Network? {
+        try {
+            val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                return cm.allNetworks.firstOrNull { net ->
+                    val caps = cm.getNetworkCapabilities(net)
+                    caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+                } ?: cm.activeNetwork
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi lấy WiFi Network", e)
+        }
+        return null
+    }
+
+    private fun openConnection(context: Context, url: URL): HttpURLConnection {
+        val network = getWifiNetwork(context)
+        return if (network != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            Log.d(TAG, "Định tuyến kết nối qua WiFi Network cụ thể: $network")
+            network.openConnection(url) as HttpURLConnection
+        } else {
+            url.openConnection() as HttpURLConnection
+        }
+    }
+
+    private fun reportNetworkConnectivity(context: Context, hasConnectivity: Boolean) {
+        try {
+            val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = getWifiNetwork(context)
+            if (network != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Log.d(TAG, "Báo cáo trạng thái kết nối mạng cho OS: network=$network, hasConnectivity=$hasConnectivity")
+                cm.reportNetworkConnectivity(network, hasConnectivity)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi báo cáo trạng thái kết nối mạng lên OS", e)
+        }
+    }
+
+    private fun extractRedirectUrlFromHtml(html: String): String? {
+        try {
+            // 1. Thử tìm thẻ meta refresh: <meta http-equiv="refresh" content="0;url=http://192.168.1.1/login">
+            val metaRegex = Regex("""<meta[^>]+http-equiv\s*=\s*["']refresh["'][^>]+url\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+            metaRegex.find(html)?.groupValues?.get(1)?.let { return it.trim() }
+
+            val metaRegex2 = Regex("""content\s*=\s*["'][^"']*url\s*=\s*([^"']+)["']""", RegexOption.IGNORE_CASE)
+            metaRegex2.find(html)?.groupValues?.get(1)?.let { return it.trim() }
+
+            // Support no-quotes
+            val metaNoQuotesRegex = Regex("""content\s*=\s*[^>]*url\s*=\s*([^\s"'>]+)""", RegexOption.IGNORE_CASE)
+            metaNoQuotesRegex.find(html)?.groupValues?.get(1)?.let { return it.trim() }
+
+            // 2. Thử tìm javascript redirect: window.location.href = "..." hoặc window.location = "..." hoặc location.replace("...")
+            val jsRegexes = listOf(
+                Regex("""window\.location\.href\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+                Regex("""window\.location\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+                Regex("""location\.href\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+                Regex("""location\.replace\(\s*["']([^"']+)["']\s*\)""", RegexOption.IGNORE_CASE),
+                Regex("""window\.location\.replace\(\s*["']([^"']+)["']\s*\)""", RegexOption.IGNORE_CASE)
+            )
+            for (regex in jsRegexes) {
+                regex.find(html)?.groupValues?.get(1)?.let { return it.trim() }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Lỗi phân tích URL chuyển hướng từ HTML", e)
+        }
+        return null
+    }
+
     /**
      * Kiểm tra xem mạng hiện tại có bị chặn bởi Captive Portal hay không.
      * Trả về URL cổng chào chuyển hướng nếu có, ngược lại trả về null.
      */
-    fun detectRedirectUrl(): String? {
+    fun detectRedirectUrl(context: Context): String? {
         var connection: HttpURLConnection? = null
         try {
             val url = URL(CHECK_URL)
-            connection = url.openConnection() as HttpURLConnection
+            connection = openConnection(context, url)
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 8000
             connection.readTimeout = 8000
@@ -48,6 +119,21 @@ object CaptivePortalBypasser {
                     Log.d(TAG, "Detected Captive Portal redirecting to: $redirectUrl")
                     return redirectUrl
                 }
+            } else if (code == 200) {
+                // Đọc HTML xem có phải trang chuyển hướng/login không (tránh một số router chặn trả về 200 OK kèm HTML)
+                val contentType = connection.contentType ?: ""
+                if (contentType.contains("text/html", ignoreCase = true)) {
+                    val html = connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                    val extractedUrl = extractRedirectUrlFromHtml(html)
+                    if (!extractedUrl.isNullOrBlank()) {
+                        Log.d(TAG, "Detected Captive Portal redirect via HTML/JS to: $extractedUrl")
+                        return extractedUrl
+                    }
+                    if (html.contains("<form", ignoreCase = true) || html.contains("<input", ignoreCase = true)) {
+                        Log.d(TAG, "Detected Captive Portal form in HTTP 200 response, using CHECK_URL")
+                        return CHECK_URL
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error detecting captive portal", e)
@@ -60,11 +146,11 @@ object CaptivePortalBypasser {
     /**
      * Kiểm tra xem thiết bị đã thực sự có kết nối Internet hoàn chỉnh hay chưa.
      */
-    fun hasInternetAccess(): Boolean {
+    fun hasInternetAccess(context: Context): Boolean {
         var connection: HttpURLConnection? = null
         try {
             val url = URL(CHECK_URL)
-            connection = url.openConnection() as HttpURLConnection
+            connection = openConnection(context, url)
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 6000
             connection.readTimeout = 6000
@@ -82,12 +168,13 @@ object CaptivePortalBypasser {
 
     /**
      * Tiến hành vượt qua trang cổng chào bằng cách giả lập bấm nút xác thực ngầm.
+     * Hỗ trợ cơ chế vòng lặp nhiều bước (Multi-step Bypass Loop) dành cho các trang chào phức tạp (như Three O'Clock).
      */
-    fun attemptAutoBypass(portalUrl: String): BypassResult {
-        Log.d(TAG, "Starting captive portal auto-bypass for: $portalUrl")
+    fun attemptAutoBypass(context: Context, portalUrl: String): BypassResult {
+        Log.d(TAG, "Starting captive portal auto-bypass loop for: $portalUrl")
         
-        // 1. Tải HTML của trang cổng chào
-        val html = fetchHtml(portalUrl)
+        var currentUrl = portalUrl
+        var html = fetchHtml(context, currentUrl)
         if (html.isBlank()) {
             return BypassResult(
                 attempted = true,
@@ -97,95 +184,135 @@ object CaptivePortalBypasser {
             )
         }
 
-        // Nhận diện tên dịch vụ dựa trên mã nguồn (ví dụ: Circle K, Highlands, Starbucks...)
         val portalName = detectPortalName(html, portalUrl)
         Log.d(TAG, "Identified captive portal name: $portalName")
 
-        // 2. Tìm kiếm và phân tích các thẻ Form
-        val formBlock = parseFormBlock(html)
-        if (formBlock == null) {
-            // Không thấy form rõ ràng, thử tìm link bấm trực tiếp
-            val directLink = findDirectConnectionLink(html, portalUrl)
-            if (directLink != null) {
-                Log.d(TAG, "No form found, but found direct connection link: $directLink. Executing GET request...")
-                executeDirectGet(directLink)
-                val internetOk = hasInternetAccess()
+        var step = 1
+        val maxSteps = 4
+        var lastResponseHtml = html
+        
+        while (step <= maxSteps) {
+            Log.d(TAG, "Executing bypass step $step/max $maxSteps...")
+            
+            // 1. Kiểm tra Internet trước khi thực hiện bước tiếp theo để tránh lặp dư thừa
+            if (hasInternetAccess(context)) {
+                Log.d(TAG, "Internet access detected at step $step! Dismissing portal.")
+                reportNetworkConnectivity(context, true)
                 return BypassResult(
                     attempted = true,
-                    success = internetOk,
+                    success = true,
                     portalName = portalName,
-                    message = if (internetOk) "Tự động vượt qua qua liên kết một chạm thành công!" else "Đã gửi yêu cầu kết nối nhưng chưa có Internet."
+                    message = "Đã tự động vượt qua trang chào WiFi '$portalName' thành công sau ${step - 1} bước!"
                 )
             }
 
-            return BypassResult(
-                attempted = true,
-                success = false,
-                portalName = portalName,
-                message = "Không tìm thấy biểu mẫu xác thực (Form) hoặc nút kết nối một chạm."
-            )
+            // 2. Thử AI Local trước cho HTML hiện tại
+            val aiPlan = WifiLocalAiEngine.analyzeCaptivePortal(lastResponseHtml, currentUrl)
+            if (aiPlan != null) {
+                Log.d(TAG, "Step $step (AI Local): targetUrl=${aiPlan.targetUrl}, method=${aiPlan.method}")
+                val ok = if (aiPlan.method == "POST") {
+                    executePostRequestWithHtmlResponse(context, aiPlan.targetUrl, aiPlan.params, currentUrl)
+                } else {
+                    executeGetRequestWithHtmlResponse(context, aiPlan.targetUrl, aiPlan.params)
+                }
+                
+                if (ok != null && ok.first.isNotBlank()) {
+                    lastResponseHtml = ok.first
+                    currentUrl = ok.second
+                    step++
+                    Thread.sleep(1500)
+                    continue
+                }
+            }
+
+            // 3. Thử phân tích Form Heuristic thủ công
+            val formBlock = parseFormBlock(lastResponseHtml)
+            if (formBlock != null) {
+                val action = formBlock.action.ifBlank { currentUrl }
+                val targetUrl = resolveAbsoluteUrl(currentUrl, action)
+                val method = formBlock.method.uppercase(Locale.getDefault())
+                val params = formBlock.inputs.toMutableMap()
+
+                Log.d(TAG, "Step $step (Heuristic Form): Target=$targetUrl | Method=$method")
+
+                val submitButtonKey = formBlock.submitButtonName
+                if (!submitButtonKey.isNullOrBlank()) {
+                    params[submitButtonKey] = formBlock.submitButtonValue ?: "Submit"
+                } else {
+                    params["submit"] = "Connect"
+                    params["connect"] = "true"
+                    params["agree"] = "1"
+                    params["accept"] = "1"
+                }
+
+                val ok = if (method == "POST") {
+                    executePostRequestWithHtmlResponse(context, targetUrl, params, currentUrl)
+                } else {
+                    executeGetRequestWithHtmlResponse(context, targetUrl, params)
+                }
+
+                if (ok != null && ok.first.isNotBlank()) {
+                    lastResponseHtml = ok.first
+                    currentUrl = ok.second
+                    step++
+                    Thread.sleep(1500)
+                    continue
+                }
+            }
+
+            // 4. Thử tìm link trực tiếp (Direct Link) trong HTML hiện tại
+            val directLink = findDirectConnectionLink(lastResponseHtml, currentUrl)
+            if (directLink != null) {
+                Log.d(TAG, "Step $step (Direct Link): Link=$directLink")
+                val nextHtml = executeDirectGetWithHtmlResponse(context, directLink)
+                if (!nextHtml.isNullOrBlank()) {
+                    lastResponseHtml = nextHtml
+                    currentUrl = directLink
+                    step++
+                    Thread.sleep(1500)
+                    continue
+                }
+            }
+
+            // Nếu không tìm thấy form, AI plan hay direct link nào nữa ở bước này
+            Log.d(TAG, "Step $step: No executable action (Form, AI or Link) found in current HTML. Stopping loop.")
+            break
         }
 
-        // 3. Phân tích các tham số trong form (bao gồm các thẻ input, hidden, và nút Submit)
-        val action = formBlock.action.ifBlank { portalUrl }
-        val targetUrl = resolveAbsoluteUrl(portalUrl, action)
-        val method = formBlock.method.uppercase(Locale.getDefault())
-        val params = formBlock.inputs.toMutableMap()
-
-        Log.d(TAG, "Found Form Target: $targetUrl | Method: $method | Params count: ${params.size}")
-
-        // 4. Giả lập bấm nút submit (thêm tham số submit nếu có nút bấm kết nối)
-        val submitButtonKey = formBlock.submitButtonName
-        if (!submitButtonKey.isNullOrBlank()) {
-            params[submitButtonKey] = formBlock.submitButtonValue ?: "Submit"
-        } else {
-            // Thêm các tham số submit giả lập phổ biến để đảm bảo Router chấp nhận
-            params["submit"] = "Connect"
-            params["connect"] = "true"
-            params["agree"] = "1"
-            params["accept"] = "1"
-        }
-
-        // 5. Gửi yêu cầu giả lập (POST hoặc GET) lên Router của WiFi
-        if (method == "POST") {
-            executePostRequest(targetUrl, params, portalUrl)
-        } else {
-            executeGetRequest(targetUrl, params)
-        }
-
-        // 6. Xác thực xem Internet đã mở hay chưa
-        Log.d(TAG, "Simulated submit finished. Verifying internet connectivity...")
-        
-        // Đợi một khoảng ngắn cho router xử lý cấp quyền
+        // Kiểm tra Internet sau khi chạy xong vòng lặp
         Thread.sleep(2000)
-        
-        val internetOk = hasInternetAccess()
-        return if (internetOk) {
-            BypassResult(
+        val finalInternetOk = hasInternetAccess(context)
+        if (finalInternetOk) {
+            reportNetworkConnectivity(context, true)
+            return BypassResult(
                 attempted = true,
                 success = true,
                 portalName = portalName,
-                message = "Đã tự động vượt qua trang chào WiFi '$portalName' thành công!"
-            )
-        } else {
-            // Thử một lần cuối với GET trực tiếp vào trang gốc (một số cổng chào chỉ cần click link gốc)
-            executeDirectGet(portalUrl)
-            Thread.sleep(1500)
-            val secondCheck = hasInternetAccess()
-            BypassResult(
-                attempted = true,
-                success = secondCheck,
-                portalName = portalName,
-                message = if (secondCheck) "Đã vượt qua trang chào thành công ở lần thử dự phòng!" else "Đã thử gửi form nhưng chưa có quyền truy cập Internet."
+                message = "Đã tự động vượt qua trang chào WiFi '$portalName' thành công nhờ cơ chế đa bước!"
             )
         }
+
+        // Dự phòng cuối: Thử GET trực tiếp vào portalUrl gốc
+        Log.d(TAG, "Final fallback: Direct GET to original portal URL: $portalUrl")
+        executeDirectGet(context, portalUrl)
+        Thread.sleep(1500)
+        val fallbackOk = hasInternetAccess(context)
+        if (fallbackOk) {
+            reportNetworkConnectivity(context, true)
+        }
+        return BypassResult(
+            attempted = true,
+            success = fallbackOk,
+            portalName = portalName,
+            message = if (fallbackOk) "Đã vượt qua trang chào thành công ở lần thử dự phòng!" else "Đã chạy hết các bước xác thực nhưng chưa được cấp quyền Internet."
+        )
     }
 
-    private fun fetchHtml(urlStr: String): String {
+    private fun fetchHtml(context: Context, urlStr: String): String {
         var connection: HttpURLConnection? = null
         try {
             val url = URL(urlStr)
-            connection = url.openConnection() as HttpURLConnection
+            connection = openConnection(context, url)
             connection.connectTimeout = 8000
             connection.readTimeout = 8000
             connection.useCaches = false
@@ -213,6 +340,7 @@ object CaptivePortalBypasser {
             lowerHtml.contains("starbucks") || lowerUrl.contains("starbucks") -> "Starbucks"
             lowerHtml.contains("gs25") || lowerUrl.contains("gs25") -> "GS25"
             lowerHtml.contains("passio") || lowerUrl.contains("passio") -> "Passio Coffee"
+            lowerHtml.contains("three o'clock") || lowerHtml.contains("threeoclock") || lowerUrl.contains("threeoclock") -> "Three O'Clock"
             lowerHtml.contains("airport") || lowerUrl.contains("airport") -> "Sân bay công cộng"
             else -> {
                 // Thử lấy thẻ <title> làm tên
@@ -238,13 +366,15 @@ object CaptivePortalBypasser {
 
         val formAttributes = formMatch.groupValues[1]
         
-        // Tìm Action
-        val actionRegex = Regex("""action\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
-        val action = actionRegex.find(formAttributes)?.groupValues?.get(1) ?: ""
+        // Tìm Action (hỗ trợ có hoặc không có dấu nháy)
+        val actionRegex = Regex("""action\s*=\s*(?:["']([^"']*)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
+        val actionMatch = actionRegex.find(formAttributes)
+        val action = actionMatch?.groupValues?.get(1)?.ifBlank { null } ?: actionMatch?.groupValues?.get(2) ?: ""
 
-        // Tìm Method
-        val methodRegex = Regex("""method\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
-        val method = methodRegex.find(formAttributes)?.groupValues?.get(1) ?: "POST"
+        // Tìm Method (hỗ trợ có hoặc không có dấu nháy)
+        val methodRegex = Regex("""method\s*=\s*(?:["']([^"']*)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
+        val methodMatch = methodRegex.find(formAttributes)
+        val method = methodMatch?.groupValues?.get(1)?.ifBlank { null } ?: methodMatch?.groupValues?.get(2) ?: "POST"
 
         // Tìm toàn bộ thẻ form đóng để giới hạn phạm vi quét inputs
         val formStartIndex = formMatch.range.first
@@ -264,13 +394,18 @@ object CaptivePortalBypasser {
 
         inputTagRegex.findAll(formContent).forEach { match ->
             val attrs = match.groupValues[1]
-            val nameRegex = Regex("""name\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-            val valueRegex = Regex("""value\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
-            val typeRegex = Regex("""type\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
+            val nameRegex = Regex("""name\s*=\s*(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
+            val valueRegex = Regex("""value\s*=\s*(?:["']([^"']*)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
+            val typeRegex = Regex("""type\s*=\s*(?:["']([^"']*)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
 
-            val name = nameRegex.find(attrs)?.groupValues?.get(1)
-            val value = valueRegex.find(attrs)?.groupValues?.get(2) ?: ""
-            val type = typeRegex.find(attrs)?.groupValues?.get(1)?.lowercase(Locale.getDefault()) ?: "text"
+            val nameMatch = nameRegex.find(attrs)
+            val name = nameMatch?.groupValues?.get(1)?.ifBlank { null } ?: nameMatch?.groupValues?.get(2)
+
+            val valueMatch = valueRegex.find(attrs)
+            val value = valueMatch?.groupValues?.get(1)?.ifBlank { null } ?: valueMatch?.groupValues?.get(2) ?: ""
+
+            val typeMatch = typeRegex.find(attrs)
+            val type = (typeMatch?.groupValues?.get(1)?.ifBlank { null } ?: typeMatch?.groupValues?.get(2) ?: "text").lowercase(Locale.getDefault())
 
             if (!name.isNullOrBlank()) {
                 if (type == "submit" || type == "button") {
@@ -286,13 +421,18 @@ object CaptivePortalBypasser {
         val buttonTagRegex = Regex("""<button\s+([^>]+)>([^<]*)</button>""", RegexOption.IGNORE_CASE)
         buttonTagRegex.findAll(formContent).forEach { match ->
             val attrs = match.groupValues[1]
-            val nameRegex = Regex("""name\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-            val typeRegex = Regex("""type\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
-            val valueRegex = Regex("""value\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
+            val nameRegex = Regex("""name\s*=\s*(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
+            val typeRegex = Regex("""type\s*=\s*(?:["']([^"']*)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
+            val valueRegex = Regex("""value\s*=\s*(?:["']([^"']*)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
 
-            val name = nameRegex.find(attrs)?.groupValues?.get(1)
-            val type = typeRegex.find(attrs)?.groupValues?.get(1)?.lowercase(Locale.getDefault()) ?: "submit"
-            val value = valueRegex.find(attrs)?.groupValues?.get(1) ?: match.groupValues[2].trim()
+            val nameMatch = nameRegex.find(attrs)
+            val name = nameMatch?.groupValues?.get(1)?.ifBlank { null } ?: nameMatch?.groupValues?.get(2)
+
+            val typeMatch = typeRegex.find(attrs)
+            val type = (typeMatch?.groupValues?.get(1)?.ifBlank { null } ?: typeMatch?.groupValues?.get(2) ?: "submit").lowercase(Locale.getDefault())
+
+            val valueMatch = valueRegex.find(attrs)
+            val value = valueMatch?.groupValues?.get(1)?.ifBlank { null } ?: valueMatch?.groupValues?.get(2) ?: match.groupValues[2].trim()
 
             if (!name.isNullOrBlank() && type == "submit") {
                 submitName = name
@@ -311,10 +451,10 @@ object CaptivePortalBypasser {
 
     private fun findDirectConnectionLink(html: String, baseUrl: String): String? {
         // Tìm các thẻ <a> có chứa từ khóa kết nối
-        val anchorRegex = Regex("""<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
+        val anchorRegex = Regex("""<a\s+[^>]*href\s*=\s*(?:["']([^"']+)["']|([^\s>]+))[^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
         anchorRegex.findAll(html).forEach { match ->
-            val href = match.groupValues[1]
-            val text = match.groupValues[2].lowercase(Locale.getDefault())
+            val href = match.groupValues.getOrNull(1)?.ifBlank { null } ?: match.groupValues.getOrNull(2) ?: ""
+            val text = match.groupValues.getOrNull(3)?.lowercase(Locale.getDefault()) ?: ""
             if (text.contains("kết nối") || text.contains("connect") || text.contains("đồng ý") ||
                 text.contains("truy cập") || text.contains("internet") || text.contains("free") || text.contains("agree")
             ) {
@@ -326,61 +466,65 @@ object CaptivePortalBypasser {
         return null
     }
 
-    private fun executeDirectGet(urlStr: String): Boolean {
-        var connection: HttpURLConnection? = null
-        try {
-            val url = URL(urlStr)
-            connection = url.openConnection() as HttpURLConnection
-            connection.connectTimeout = 8000
-            connection.readTimeout = 8000
-            connection.useCaches = false
-            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36")
-            val code = connection.responseCode
-            return code in 200..399
-        } catch (_: Exception) {
-            return false
-        } finally {
-            connection?.disconnect()
-        }
-    }
+    // --- CÁC HÀM HTTP PHẢN HỒI HTML (HỖ TRỢ BYPASS NHIỀU BƯỚC) ---
 
-    private fun executePostRequest(targetUrl: String, params: Map<String, String>, referer: String): Boolean {
+    private fun executePostRequestWithHtmlResponse(
+        context: Context,
+        targetUrl: String,
+        params: Map<String, String>,
+        referer: String
+    ): Pair<String, String>? {
         var connection: HttpURLConnection? = null
         try {
             val url = URL(targetUrl)
-            connection = url.openConnection() as HttpURLConnection
+            connection = openConnection(context, url)
             connection.requestMethod = "POST"
             connection.connectTimeout = 10000
             connection.readTimeout = 10000
             connection.doOutput = true
             connection.useCaches = false
             
-            // Thiết lập Headers chuẩn trình duyệt điện thoại để vượt tường lửa Router
             connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36")
             connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
             connection.setRequestProperty("Referer", referer)
             connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
-            // Ghi dữ liệu POST body
             val postData = buildQueryString(params)
-            Log.d(TAG, "Executing POST to $targetUrl with body: $postData")
+            Log.d(TAG, "POST Request to $targetUrl body: $postData")
             OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { writer ->
                 writer.write(postData)
                 writer.flush()
             }
 
             val code = connection.responseCode
-            Log.d(TAG, "POST Request returned response code: $code")
-            return code in 200..399
+            Log.d(TAG, "POST Response code: $code")
+            if (code in 200..399) {
+                val location = connection.getHeaderField("Location")
+                val actualUrl = if (!location.isNullOrBlank()) {
+                    resolveAbsoluteUrl(targetUrl, location)
+                } else {
+                    connection.url.toString()
+                }
+                val htmlResponse = try {
+                    connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                } catch (_: Exception) {
+                    ""
+                }
+                return Pair(htmlResponse, actualUrl)
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error executing HTTP POST to bypass portal", e)
-            return false
+            Log.e(TAG, "Lỗi khi gọi POST và đọc HTML phản hồi", e)
         } finally {
             connection?.disconnect()
         }
+        return null
     }
 
-    private fun executeGetRequest(targetUrl: String, params: Map<String, String>): Boolean {
+    private fun executeGetRequestWithHtmlResponse(
+        context: Context,
+        targetUrl: String,
+        params: Map<String, String>
+    ): Pair<String, String>? {
         var connection: HttpURLConnection? = null
         try {
             val queryString = buildQueryString(params)
@@ -390,9 +534,9 @@ object CaptivePortalBypasser {
                 "$targetUrl?$queryString"
             }
             
-            Log.d(TAG, "Executing GET to $fullUrl")
+            Log.d(TAG, "GET Request to $fullUrl")
             val url = URL(fullUrl)
-            connection = url.openConnection() as HttpURLConnection
+            connection = openConnection(context, url)
             connection.requestMethod = "GET"
             connection.connectTimeout = 10000
             connection.readTimeout = 10000
@@ -400,14 +544,61 @@ object CaptivePortalBypasser {
             connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36")
 
             val code = connection.responseCode
-            Log.d(TAG, "GET Request returned response code: $code")
-            return code in 200..399
+            Log.d(TAG, "GET Response code: $code")
+            if (code in 200..399) {
+                val location = connection.getHeaderField("Location")
+                val actualUrl = if (!location.isNullOrBlank()) {
+                    resolveAbsoluteUrl(fullUrl, location)
+                } else {
+                    connection.url.toString()
+                }
+                val htmlResponse = try {
+                    connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                } catch (_: Exception) {
+                    ""
+                }
+                return Pair(htmlResponse, actualUrl)
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error executing HTTP GET to bypass portal", e)
-            return false
+            Log.e(TAG, "Lỗi khi gọi GET và đọc HTML phản hồi", e)
         } finally {
             connection?.disconnect()
         }
+        return null
+    }
+
+    private fun executeDirectGetWithHtmlResponse(context: Context, urlStr: String): String? {
+        var connection: HttpURLConnection? = null
+        try {
+            val url = URL(urlStr)
+            connection = openConnection(context, url)
+            connection.connectTimeout = 8000
+            connection.readTimeout = 8000
+            connection.useCaches = false
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36")
+            val code = connection.responseCode
+            if (code in 200..399) {
+                return connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+            }
+        } catch (_: Exception) {
+        } finally {
+            connection?.disconnect()
+        }
+        return null
+    }
+
+    // --- CÁC HÀM TIỆN ÍCH DỰ PHÒNG CŨ (ĐỂ ĐẢM BẢO TƯƠNG THÍCH NGƯỢC) ---
+
+    private fun executeDirectGet(context: Context, urlStr: String): Boolean {
+        return executeDirectGetWithHtmlResponse(context, urlStr) != null
+    }
+
+    private fun executePostRequest(context: Context, targetUrl: String, params: Map<String, String>, referer: String): Boolean {
+        return executePostRequestWithHtmlResponse(context, targetUrl, params, referer) != null
+    }
+
+    private fun executeGetRequest(context: Context, targetUrl: String, params: Map<String, String>): Boolean {
+        return executeGetRequestWithHtmlResponse(context, targetUrl, params) != null
     }
 
     private fun buildQueryString(params: Map<String, String>): String {

@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import com.antigravity.wifimanager.receiver.WifiAutoScheduleReceiver
+import com.antigravity.wifimanager.data.WifiRepository
 
 /**
  * Tiện ích lên lịch tự động cập nhật dữ liệu WiFi offline bằng AlarmManager.
@@ -27,8 +28,22 @@ object WifiScheduler {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val pendingIntent = buildPendingIntent(context)
 
+        val repository = WifiRepository(context.applicationContext)
+        val lastUpdate = repository.getLastAutoUpdateMs()
         val intervalMs = intervalDays * 24L * 60L * 60L * 1000L
-        val triggerAtMs = System.currentTimeMillis() + intervalMs
+
+        val triggerAtMs = if (lastUpdate > 0L) {
+            val nextUpdate = lastUpdate + intervalMs
+            if (nextUpdate > System.currentTimeMillis()) {
+                nextUpdate
+            } else {
+                // Đã quá hạn cập nhật, kích hoạt sớm sau 10 giây (tránh chặn UI ngay khi vừa mở app)
+                System.currentTimeMillis() + 10_000L
+            }
+        } else {
+            // Chưa từng cập nhật, lên lịch chạy sớm sau 1 phút để người dùng có dữ liệu ngay
+            System.currentTimeMillis() + 60_000L
+        }
 
         am.setInexactRepeating(
             AlarmManager.RTC_WAKEUP,

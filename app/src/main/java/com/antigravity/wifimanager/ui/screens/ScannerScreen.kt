@@ -16,6 +16,8 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.AutoAwesome
+import java.util.Locale
 import androidx.compose.material3.*
 import androidx.compose.ui.platform.LocalContext
 import com.antigravity.wifimanager.ui.components.AddressText
@@ -33,6 +35,8 @@ import com.antigravity.wifimanager.data.WifiApInfo
 import com.antigravity.wifimanager.data.WifiConnectionState
 import com.antigravity.wifimanager.data.WifiCredentialKeys
 import com.antigravity.wifimanager.data.WifiCredentialRefreshResult
+import com.antigravity.wifimanager.data.SharedWifiCredential
+import com.antigravity.wifimanager.data.WifiLocalAiEngine
 import com.antigravity.wifimanager.ui.scanner.ScannerUiMapper
 import com.antigravity.wifimanager.ui.components.GlassCard
 import com.antigravity.wifimanager.ui.components.WifiBandBadge
@@ -58,6 +62,8 @@ fun ScannerScreen(
     refreshingPasswordApKey: String? = null,
     connectedSignalPercent: Int = 0,
     scanCounter: Int = 0,
+    savedPasswords: Map<String, String> = emptyMap(),
+    offlinePasswords: List<SharedWifiCredential> = emptyList(),
     onRefreshScan: () -> Unit,
     onConnectNetwork: (ssid: String, bssid: String, password: String?) -> Unit,
     onHasSystemCredential: (String) -> Boolean,
@@ -311,7 +317,7 @@ fun ScannerScreen(
             }
         }
 
-        // Hộp thoại nhập mật khẩu phong cách Sci-Fi Glass Dialog cực kỳ cao cấp
+        // Hộp thoại nhập mật khẩu phong cách Sci-Fi Glass Dialog cực kỳ cao cấp với hỗ trợ gợi ý của AI
         if (passwordDialogSsid != null) {
             val activeSsid = passwordDialogSsid!!
             val activeBssid = passwordDialogBssid
@@ -326,11 +332,22 @@ fun ScannerScreen(
                 containerColor = CosmicBgStart, // Đảm bảo nền tối độ tương phản cao dễ đọc
                 modifier = Modifier.border(1.dp, Color(0x18FFFFFF), RoundedCornerShape(24.dp)),
                 title = {
-                    Text(
-                        text = if (!savedPassword.isNullOrEmpty()) "Mật khẩu mạng đã lưu" else "Cấu hình mật khẩu WiFi",
-                        fontWeight = FontWeight.Black,
-                        color = TextPrimary
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = CyberCyan,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = if (!savedPassword.isNullOrEmpty()) "Mật khẩu mạng đã lưu" else "Cấu hình mật khẩu WiFi",
+                            fontWeight = FontWeight.Black,
+                            color = TextPrimary
+                        )
+                    }
                 },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -342,7 +359,7 @@ fun ScannerScreen(
                         )
                         if (!rootConnectAvailable) {
                             Text(
-                                text = "Thiết bị chưa Root — mật khẩu sẽ chỉ lưu cục bộ trong ứng dụng này. Để kết nối thật, hãy sao chép rồi dán vào cài đặt WiFi hệ thống.",
+                                text = "⚠️ Thiết bị chưa Root — mật khẩu sẽ chỉ lưu cục bộ trong ứng dụng này. Để kết nối thật, hãy sao chép rồi dán vào cài đặt WiFi hệ thống.",
                                 fontSize = 11.sp,
                                 color = CyberAmber,
                                 lineHeight = 16.sp
@@ -365,14 +382,80 @@ fun ScannerScreen(
                             )
                         )
                         
-                        val similarSsid = passwordDialogSimilarSsid
-                        if (savedPassword.isNullOrEmpty() && !similarSsid.isNullOrBlank()) {
-                            Text(
-                                text = "✨ Gợi ý mật khẩu từ SSID tương tự: '$similarSsid'",
-                                fontSize = 12.sp,
-                                color = CyberPurple,
-                                fontWeight = FontWeight.Bold
-                            )
+                        // Gợi ý mật khẩu thông minh bằng AI
+                        Spacer(modifier = Modifier.height(4.dp))
+                        GlassCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            containerColor = CyberPurple.copy(alpha = 0.05f),
+                            leftIndicatorColor = CyberPurple
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = CyberPurple,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Text(
+                                        text = "GỢI Ý MẬT KHẨU TỪ AI",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = CyberPurple,
+                                        letterSpacing = 1.sp
+                                    )
+                                }
+                                
+                                val aiPredictions = remember(activeSsid, passwordDialogBssid, savedPasswords, offlinePasswords) {
+                                    WifiLocalAiEngine.predictPasswords(
+                                        targetSsid = activeSsid,
+                                        targetBssid = passwordDialogBssid,
+                                        savedPasswords = savedPasswords,
+                                        offlineCredentials = offlinePasswords
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    aiPredictions.forEach { prediction ->
+                                        Column(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .background(Color(0x0CFFFFFF), RoundedCornerShape(12.dp))
+                                                .border(1.dp, Color(0x15FFFFFF), RoundedCornerShape(12.dp))
+                                                .clickable { passwordInput = prediction.password }
+                                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Text(
+                                                text = prediction.password,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = TextPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = prediction.source,
+                                                fontSize = 7.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = CyberPurple,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 },
@@ -382,9 +465,8 @@ fun ScannerScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
                         onClick = {
                             if (!rootConnectAvailable) {
-                                // Nếu không có Root, ta cho phép lưu mật khẩu vào DB cục bộ
-                                onRemovePassword(activeSsid, activeBssid) // Reset
-                                onConnectNetwork(activeSsid, activeBssid ?: "02:00:00:00:00:00", passwordInput) // Lưu
+                                onRemovePassword(activeSsid, activeBssid)
+                                onConnectNetwork(activeSsid, activeBssid ?: "02:00:00:00:00:00", passwordInput)
                                 passwordDialogSsid = null
                                 passwordDialogBssid = null
                                 return@Button
@@ -393,7 +475,7 @@ fun ScannerScreen(
                                 activeSsid,
                                 passwordDialogBssid ?: "02:00:00:00:00:00",
                                 passwordInput
-                            )
+                             )
                             passwordDialogSsid = null
                             passwordDialogBssid = null
                         }
@@ -401,8 +483,8 @@ fun ScannerScreen(
                         Text(
                             text = when {
                                 !rootConnectAvailable -> "Lưu mật khẩu"
-                                savedPassword.isNullOrEmpty() -> "Kết nối"
-                                else -> "Cập nhật & kết nối"
+                                savedPassword.isNullOrEmpty() -> "⚡ Kết nối"
+                                else -> "⚡ Cập nhật & kết nối"
                             },
                             fontWeight = FontWeight.Bold,
                             color = Color.Black
@@ -791,6 +873,34 @@ private fun WifiApRow(
                         )
                     }
                 }
+
+                // Nhãn Đề xuất AI thông minh (AI Smart Recommendation Tag)
+                val isBypassable = ap.isOpenSecurity() && (ap.ssid.lowercase().contains("circle") || ap.ssid.lowercase().contains("highland") || ap.ssid.lowercase().contains("free") || ap.ssid.lowercase().contains("gs25"))
+                val score = when {
+                    isConnectedState -> 100
+                    ap.signalPercent >= 80 && ap.is5GHz -> 95
+                    ap.signalPercent >= 75 -> 85
+                    ap.signalPercent >= 50 && ap.is5GHz -> 75
+                    ap.signalPercent >= 50 -> 60
+                    else -> 25
+                }
+                
+                val (aiLabel, aiColor) = when {
+                    isConnectedState -> "🤖 AI: Bảo vệ kết nối tối ưu nhất" to CyberCyan
+                    isBypassable -> "🤖 AI Local: Vượt cổng chào tự động" to CyberCyan
+                    score >= 90 -> "🤖 AI Đề xuất (${score}%): Sóng siêu khỏe 5GHz" to CyberEmerald
+                    score >= 75 -> "🤖 AI Đề xuất (${score}%): Kết nối rất ổn định" to CyberIndigo
+                    score >= 50 -> "🤖 AI Khuyên dùng (${score}%): Đủ dùng cơ bản" to TextSecondary
+                    else -> "⚠️ AI Khuyên tránh (${score}%): Mạng rất kém" to CyberRose
+                }
+
+                Text(
+                    text = aiLabel,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = aiColor,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                )
 
                 Spacer(modifier = Modifier.height(4.dp))
 

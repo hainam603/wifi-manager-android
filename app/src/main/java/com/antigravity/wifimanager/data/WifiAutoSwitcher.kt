@@ -58,28 +58,54 @@ class WifiAutoSwitcher(private val repository: WifiRepository) {
         val currentAp = findCurrentAp(scanResults, currentState)
         val on24Ghz = isCurrentlyOn24Ghz(currentState, currentAp)
 
-        val candidates = scanResults.filter { ap ->
-            isEligibleCandidate(ap, currentState, on24Ghz) &&
-                (!ap.isSharedPasswordRejected || repository.hasSavedWifiPassword(ap.ssid))
+        // Tích hợp AI Local (Smart Switcher Model): Phân tích, chấm điểm và lựa chọn mạng
+        val aiCandidates = scanResults.mapNotNull { ap ->
+            val isSame = ap.bssid.equals(currentState.bssid, ignoreCase = true) &&
+                    currentState.bssid.isNotBlank() &&
+                    !currentState.bssid.equals("02:00:00:00:00:00", ignoreCase = true)
+            if (isSame || !isTrustedForSwitch(ap.ssid, currentState.ssid)) {
+                return@mapNotNull null
+            }
+            if (ap.isSharedPasswordRejected && !repository.hasSavedWifiPassword(ap.ssid)) {
+                return@mapNotNull null
+            }
+
+            val failedCount = if (ap.isSharedPasswordRejected) 1 else 0
+            val decision = WifiLocalAiEngine.evaluateSwitch(
+                current = currentState,
+                target = ap,
+                userActivity = "STILL", // Mặc định ở trạng thái tĩnh (có thể mở rộng với Activity API)
+                failedAttemptsCount = failedCount,
+                prefer5Ghz = repository.isPrefer5GhzEnabled()
+            )
+
+            if (decision.shouldSwitch) {
+                ap to decision
+            } else {
+                null
+            }
         }
 
-        if (candidates.isEmpty()) {
+        if (aiCandidates.isEmpty()) {
             val message = if (repository.isPrefer5GhzEnabled() && on24Ghz) {
-                "Không có mạng 5 GHz tin cậy phù hợp để chuyển"
+                "Không có mạng 5 GHz tin cậy phù hợp để chuyển ngầm"
             } else {
-                "Không tìm thấy mạng tin cậy mạnh hơn (+10%)"
+                "Không tìm thấy mạng có điểm AI Local vượt ngưỡng (>75%)"
             }
             return SwitchAttemptResult(attempted = false, userMessage = message)
         }
 
         repository.setLastSwitchAtMs(now)
 
-        val best = candidates.sortedWith(
-            compareByDescending<WifiApInfo> { it.is5GHz }
-                .thenByDescending { it.signalPercent }
-                .thenByDescending { it.frequencyMhz }
-                .thenBy { it.ssid.lowercase(Locale.getDefault()) }
+        // Sắp xếp theo điểm số AI cao nhất, sau đó đến sóng khỏe nhất
+        val bestPair = aiCandidates.sortedWith(
+            compareByDescending<Pair<WifiApInfo, WifiLocalAiEngine.SwitchDecision>> { it.second.score }
+                .thenByDescending { it.first.is5GHz }
+                .thenByDescending { it.first.signalPercent }
         ).first()
+
+        val best = bestPair.first
+        val decision = bestPair.second
 
         val savedPassword = repository.resolveConnectionPassword(best.ssid, bssid = best.bssid)
         val connectResult = repository.connectToNetwork(
@@ -89,14 +115,22 @@ class WifiAutoSwitcher(private val repository: WifiRepository) {
             bssid = best.bssid
         )
         var success = connectResult.success
-        var failureReason: String? = if (!success) connectResult.message else null
+        var failureReason: String? = if (!success) {
+            "🤖 AI Local đề xuất '${best.ssid}' thất bại: ${connectResult.message ?: "Hệ thống từ chối kết nối"}"
+        } else {
+            null
+        }
 
         if (!success && !repository.isRootAvailable()) {
             onNotifyUser?.invoke(currentState, best)
         }
 
         val finalState = repository.getCurrentConnectionState()
-        val connectionStatus = ConnectionStatusFormatter.fromState(finalState)
+        val connectionStatus = if (success) {
+            "🤖 Quyết định bởi AI Local (Độ tin cậy: ${(decision.score * 100).toInt()}%). Trạng thái: ${ConnectionStatusFormatter.fromState(finalState)}"
+        } else {
+            ConnectionStatusFormatter.fromState(finalState)
+        }
 
         val sdf = SimpleDateFormat("HH:mm:ss dd/MM/yyyy", Locale.getDefault())
         repository.addHistoryLog(

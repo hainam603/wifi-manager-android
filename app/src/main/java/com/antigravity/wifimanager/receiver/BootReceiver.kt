@@ -24,5 +24,10 @@ class BootReceiver : BroadcastReceiver() {
         if (!MonitorServiceStarter.hasRequiredPermissions(context)) return
 
         MonitorServiceStarter.start(context)
+
+        // Tự khởi chạy lại dịch vụ Split DNS VPN vượt chặn nếu được bật
+        if (repository.isSplitDnsEnabled() && android.net.VpnService.prepare(context) == null) {
+            com.antigravity.wifimanager.service.SplitDnsVpnService.startService(context)
+        }
     }
 }

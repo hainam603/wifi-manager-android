@@ -10,6 +10,8 @@ import android.content.ServiceConnection
 import android.net.wifi.WifiManager
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.net.VpnService
+import com.antigravity.wifimanager.service.SplitDnsVpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -43,6 +45,7 @@ import com.antigravity.wifimanager.data.WifiApInfo
 import com.antigravity.wifimanager.data.WifiAutoSwitcher
 import com.antigravity.wifimanager.data.WifiConnectionState
 import com.antigravity.wifimanager.data.WifiRepository
+import com.antigravity.wifimanager.data.CaptivePortalBypasser
 import com.antigravity.wifimanager.service.WifiMonitorService
 import com.antigravity.wifimanager.util.MonitorServiceStarter
 import com.antigravity.wifimanager.util.WifiScheduler
@@ -111,12 +114,37 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    var onVpnPermissionResult: ((Boolean) -> Unit)? = null
+
+    private val requestVpnLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val granted = result.resultCode == RESULT_OK
+        if (granted) {
+            SplitDnsVpnService.startService(this)
+            ToastHelper.show(this, "Đã khởi động Split DNS VPN vượt chặn thành công!")
+        } else {
+            repository.setSplitDnsEnabled(false)
+            ToastHelper.show(this, "Quyền VPN bị từ chối. Không thể vượt chặn trang web.")
+        }
+        onVpnPermissionResult?.invoke(granted)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         repository = WifiRepository(this)
         autoSwitcher = WifiAutoSwitcher(repository)
 
         checkAndRequestPermissions()
+
+        // Tự động khởi động lại Split DNS VPN nếu được bật và đã có quyền
+        if (repository.isSplitDnsEnabled()) {
+            if (VpnService.prepare(this) == null) {
+                SplitDnsVpnService.startService(this)
+            } else {
+                repository.setSplitDnsEnabled(false)
+            }
+        }
 
         // Đặt lại lịch tự động cập nhật dữ liệu offline (cần gọi mỗi lần app khởi động)
         WifiScheduler.reschedule(this, repository.getAutoUpdateIntervalDays())
@@ -234,6 +262,20 @@ class MainActivity : ComponentActivity() {
         var autoUpdateIntervalDays by remember { mutableIntStateOf(repository.getAutoUpdateIntervalDays()) }
         var lastAutoUpdateMs by remember { mutableLongStateOf(repository.getLastAutoUpdateMs()) }
         var isAutoUpdating by remember { mutableStateOf(false) }
+        var geminiApiKey by remember { mutableStateOf(repository.getGeminiApiKey()) }
+        var geminiAiEnabled by remember { mutableStateOf(repository.isGeminiAiEnabled()) }
+        var geminiAutoPilotEnabled by remember { mutableStateOf(repository.isGeminiAutoPilotEnabled()) }
+        var isTestingGemini by remember { mutableStateOf(false) }
+        var splitDnsEnabled by remember { mutableStateOf(repository.isSplitDnsEnabled()) }
+
+        DisposableEffect(Unit) {
+            onVpnPermissionResult = { granted ->
+                splitDnsEnabled = granted && repository.isSplitDnsEnabled()
+            }
+            onDispose {
+                onVpnPermissionResult = null
+            }
+        }
 
         suspend fun rebuildScannerDisplay() {
             val snapshot = connectionState
@@ -355,6 +397,31 @@ class MainActivity : ComponentActivity() {
 
         LaunchedEffect(Unit) {
             startScanFromButton()
+
+            // Tự động kiểm tra và cập nhật offline ngầm nếu đã quá hạn chu kỳ hoạt động
+            if (repository.isSharedWifiOfflineEnabled()) {
+                val lastUpdate = repository.getLastAutoUpdateMs()
+                val intervalDays = repository.getAutoUpdateIntervalDays()
+                if (intervalDays > 0) {
+                    val intervalMs = intervalDays * 24L * 60L * 60L * 1000L
+                    val nextUpdate = lastUpdate + intervalMs
+                    if (System.currentTimeMillis() >= nextUpdate) {
+                        android.util.Log.i("MainActivity", "Auto update offline data triggered due to expiration")
+                        coroutineScope.launch(Dispatchers.IO) {
+                            try {
+                                repository.prefetchSharedWifiArea()
+                                withContext(Dispatchers.Main) {
+                                    lastAutoUpdateMs = repository.getLastAutoUpdateMs()
+                                    sharedWifiOfflineCount = repository.getSharedWifiOfflineCount()
+                                    sharedWifiOfflineStorageUsedMb = repository.getSharedWifiOfflineStorageMb()
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.e("MainActivity", "Failed to auto-update offline data", e)
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Quét realtime khi đang ở tab Quét WiFi
@@ -674,6 +741,8 @@ class MainActivity : ComponentActivity() {
                         refreshingPasswordApKey = refreshingPasswordApKey,
                         connectedSignalPercent = scannerConnectedSignal,
                         scanCounter = scanCounter,
+                        savedPasswords = savedPasswords,
+                        offlinePasswords = offlinePasswords,
                         onRefreshScan = { startScanFromButton() },
                          onConnectNetwork = { ssid, bssid, password ->
                             if (connectingApKey != null || isScanning) return@ScannerScreen
@@ -867,6 +936,9 @@ class MainActivity : ComponentActivity() {
                     3 -> HistoryScreen(
                         historyLogs = historyLogs,
                         isClearingHistory = isClearingHistory,
+                        geminiAiEnabled = geminiAiEnabled,
+                        geminiApiKey = geminiApiKey,
+                        hasRoot = rootStatus == RootStatus.GRANTED,
                         onClearHistory = {
                             if (isClearingHistory) return@HistoryScreen
                             coroutineScope.launch {
@@ -883,6 +955,106 @@ class MainActivity : ComponentActivity() {
                                     )
                                 } finally {
                                     isClearingHistory = false
+                                }
+                            }
+                        },
+                        onExecuteAiAction = { actionType, arg ->
+                            when (actionType) {
+                                "BYPASS_CAPTIVE" -> {
+                                    coroutineScope.launch {
+                                        loadingMessage = "🤖 AI Local đang tự động vượt cổng chào WiFi..."
+                                        try {
+                                            val redirectUrl = withContext(Dispatchers.IO) {
+                                                CaptivePortalBypasser.detectRedirectUrl(this@MainActivity)
+                                            }
+                                            if (redirectUrl.isNullOrBlank()) {
+                                                ToastHelper.show(this@MainActivity, "Không phát hiện URL cổng chào chuyển hướng. WiFi có thể đã có mạng.")
+                                                return@launch
+                                            }
+                                            val result = withContext(Dispatchers.IO) {
+                                                CaptivePortalBypasser.attemptAutoBypass(this@MainActivity, redirectUrl)
+                                            }
+                                            if (result.success) {
+                                                ToastHelper.show(this@MainActivity, "⚡ AI Local đã vượt cổng chào '${result.portalName}' thành công!")
+                                                connectionState = repository.getCurrentConnectionState()
+                                                historyLogs = repository.getHistoryLogs()
+                                            } else {
+                                                ToastHelper.show(this@MainActivity, "❌ Không thể vượt cổng chào tự động: ${result.message}")
+                                            }
+                                        } catch (e: Exception) {
+                                            ToastHelper.show(this@MainActivity, "Lỗi: ${e.localizedMessage}")
+                                        } finally {
+                                            loadingMessage = null
+                                        }
+                                    }
+                                }
+                                "TRY_COMMON_PASSWORDS" -> {
+                                    coroutineScope.launch {
+                                        val commonPasswords = mutableListOf(
+                                            "12345678", "88888888", "99999999", "00000000", "11111111", 
+                                            "wifichua", "matkhau123", "dangnhap", "vietnam123", "haiphong123"
+                                        )
+                                        val cleanSsid = arg.lowercase(Locale.getDefault()).replace(" ", "").replace("\"", "")
+                                        if (cleanSsid.isNotBlank()) {
+                                            commonPasswords.add(0, cleanSsid)
+                                            commonPasswords.add(1, cleanSsid + "123")
+                                            commonPasswords.add(2, cleanSsid + "vn")
+                                            commonPasswords.add(3, cleanSsid + "@123")
+                                        }
+
+                                        var success = false
+                                        var matchedPassword = ""
+
+                                        for ((index, pass) in commonPasswords.distinct().withIndex()) {
+                                            loadingMessage = "🤖 AI đang thử mật khẩu phổ biến (${index + 1}/${commonPasswords.size}): '$pass'..."
+                                            val result = withContext(Dispatchers.IO) {
+                                                repository.connectToNetwork(ssid = arg, password = pass)
+                                            }
+                                            if (result.success) {
+                                                success = true
+                                                matchedPassword = pass
+                                                break
+                                            }
+                                            delay(1200)
+                                        }
+
+                                        if (success) {
+                                            withContext(Dispatchers.IO) {
+                                                repository.saveWifiPassword(arg, matchedPassword)
+                                            }
+                                            ToastHelper.show(this@MainActivity, "⚡ Kết nối THÀNH CÔNG! Mật khẩu dò được: '$matchedPassword'")
+                                            connectionState = repository.getCurrentConnectionState()
+                                            historyLogs = repository.getHistoryLogs()
+                                            savedPasswords = repository.getSavedWifiPasswords()
+                                        } else {
+                                            ToastHelper.show(this@MainActivity, "❌ Đã thử hết mật khẩu phổ biến của AI nhưng không thành công.")
+                                        }
+                                        loadingMessage = null
+                                    }
+                                }
+                                "SWITCH_TO_BETTER_WIFI" -> {
+                                    coroutineScope.launch {
+                                        loadingMessage = "🤖 AI Local đang quét tìm và chuyển mạng tối ưu không có độ trễ..."
+                                        try {
+                                            val result = withContext(Dispatchers.IO) {
+                                                autoSwitcher.attemptSwitch(
+                                                    currentState = connectionState,
+                                                    enforceCooldown = false
+                                                )
+                                            }
+                                            if (result.attempted && result.success) {
+                                                ToastHelper.show(this@MainActivity, "⚡ ${result.userMessage ?: "Đã chuyển mạng thành công"}")
+                                                connectionState = repository.getCurrentConnectionState()
+                                                historyLogs = repository.getHistoryLogs()
+                                            } else {
+                                                ToastHelper.show(this@MainActivity, "Chuyển mạng: ${result.userMessage ?: "Không có mạng nào tối ưu hơn"}")
+                                            }
+                                        } catch (e: Exception) {
+                                            ToastHelper.show(this@MainActivity, "Lỗi chuyển mạng: ${e.localizedMessage}")
+                                        } finally {
+                                            loadingMessage = null
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1030,6 +1202,10 @@ class MainActivity : ComponentActivity() {
                         autoUpdateIntervalDays = autoUpdateIntervalDays,
                         lastAutoUpdateMs = lastAutoUpdateMs,
                         isAutoUpdating = isAutoUpdating,
+                        geminiApiKey = geminiApiKey,
+                        geminiAiEnabled = geminiAiEnabled,
+                        geminiAutoPilotEnabled = geminiAutoPilotEnabled,
+                        isTestingGemini = isTestingGemini,
                         onAutoUpdateIntervalChange = { days ->
                             repository.setAutoUpdateIntervalDays(days)
                             autoUpdateIntervalDays = days
@@ -1062,6 +1238,52 @@ class MainActivity : ComponentActivity() {
                                     isAutoUpdating = false
                                     sharedWifiPrefetchProgress = null
                                 }
+                            }
+                        },
+                        onGeminiApiKeyChange = { valNew ->
+                             repository.setGeminiApiKey(valNew)
+                             geminiApiKey = valNew
+                        },
+                        onGeminiAiToggle = { valNew ->
+                             repository.setGeminiAiEnabled(valNew)
+                             geminiAiEnabled = valNew
+                        },
+                        onGeminiAutoPilotToggle = { valNew ->
+                             repository.setGeminiAutoPilotEnabled(valNew)
+                             geminiAutoPilotEnabled = valNew
+                        },
+                        onTestGeminiConnection = {
+                             if (isTestingGemini) return@SettingsScreen
+                             coroutineScope.launch {
+                                 isTestingGemini = true
+                                 try {
+                                     val errorMsg = com.antigravity.wifimanager.data.GeminiAiManager.testConnection(geminiApiKey)
+                                     val msg = if (errorMsg == null) {
+                                         "Kết nối Gemini AI thành công! Trợ lý đã sẵn sàng."
+                                     } else {
+                                         errorMsg
+                                     }
+                                     ToastHelper.show(this@MainActivity, msg)
+                                 } finally {
+                                     isTestingGemini = false
+                                 }
+                             }
+                        },
+                        splitDnsEnabled = splitDnsEnabled,
+                        onSplitDnsToggle = { enabled ->
+                            repository.setSplitDnsEnabled(enabled)
+                            splitDnsEnabled = enabled
+                            if (enabled) {
+                                val prepareIntent = VpnService.prepare(this@MainActivity)
+                                if (prepareIntent != null) {
+                                    requestVpnLauncher.launch(prepareIntent)
+                                } else {
+                                    SplitDnsVpnService.startService(this@MainActivity)
+                                    ToastHelper.show(this@MainActivity, "Đã khởi động Split DNS VPN vượt chặn thành công!")
+                                }
+                            } else {
+                                SplitDnsVpnService.stopService(this@MainActivity)
+                                ToastHelper.show(this@MainActivity, "Đã dừng Split DNS VPN")
                             }
                         }
                     )

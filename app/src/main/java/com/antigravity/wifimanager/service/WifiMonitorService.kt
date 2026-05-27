@@ -39,8 +39,8 @@ class WifiMonitorService : Service() {
     companion object {
         const val ACTION_STOP = "STOP_SERVICE"
         const val ACTION_SCAN_NOW = "SCAN_NOW"
-        private const val PERIODIC_CHECK_INTERVAL_MS = 20_000L   // giảm từ 45s → 20s
-        private const val STATE_DEBOUNCE_MS = 5_000L              // giảm từ 12s → 5s
+        private const val PERIODIC_CHECK_INTERVAL_MS = 60_000L   // Tăng từ 20s -> 60s để siêu tiết kiệm pin
+        private const val STATE_DEBOUNCE_MS = 6_000L
         private const val NOTIFICATION_MIN_INTERVAL_MS = 30_000L
         private const val SIGNAL_NOTIFY_DELTA = 5
     }
@@ -59,6 +59,25 @@ class WifiMonitorService : Service() {
     private var lastBypassAttemptTimeMs = 0L
     private var periodicJob: Job? = null
     private var switchInProgress = false
+    private var isScreenReceiverRegistered = false
+    private var isScreenOn = true
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_ON -> {
+                    isScreenOn = true
+                    Log.d("WifiMonitorService", "📱 Màn hình BẬT: Khôi phục giám sát WiFi.")
+                    startPeriodicMonitor()
+                }
+                Intent.ACTION_SCREEN_OFF -> {
+                    isScreenOn = false
+                    Log.d("WifiMonitorService", "📱 Màn hình TẮT: Tạm dừng quét WiFi định kỳ để siêu tiết kiệm pin.")
+                    periodicJob?.cancel() // Dừng quét định kỳ hoàn toàn
+                }
+            }
+        }
+    }
 
     private var lastStateCheckMs = 0L
     private var lastNotificationMs = 0L
@@ -128,6 +147,18 @@ class WifiMonitorService : Service() {
         )
         isRegistered = true
 
+        // Đăng ký Screen On/Off receiver để siêu tiết kiệm pin
+        val screenFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        registerReceiver(screenReceiver, screenFilter)
+        isScreenReceiverRegistered = true
+
+        // Xác định trạng thái màn hình hiện tại khi khởi chạy dịch vụ
+        val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        isScreenOn = pm.isInteractive
+
         updateConnectionState(force = true)
         startPeriodicMonitor()
     }
@@ -165,16 +196,26 @@ class WifiMonitorService : Service() {
 
     private fun startPeriodicMonitor() {
         periodicJob?.cancel()
+        if (!isScreenOn) return // Nếu màn hình tắt thì không quét định kỳ
+
         periodicJob = serviceScope.launch {
             while (isActive) {
                 delay(PERIODIC_CHECK_INTERVAL_MS)
-                // Yêu cầu OS làm mới danh sách WiFi — kết quả sẽ đến qua SCAN_RESULTS_AVAILABLE_ACTION
-                // Đây là fire-and-forget: không chờ kết quả, không block
-                @Suppress("DEPRECATION")
-                try {
-                    val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                    wm.startScan()
-                } catch (_: Exception) {}
+                
+                val state = repository.getCurrentConnectionState()
+                val threshold = repository.getThreshold()
+
+                // CHỈ quét WiFi khi: Màn hình đang bật AND (chưa kết nối WiFi HOẶC sóng hiện tại yếu hơn ngưỡng yếu)
+                if (isScreenOn && (!state.isConnected || state.signalPercent < threshold)) {
+                    Log.d("WifiMonitorService", "⚡ Sóng WiFi yếu (${state.signalPercent}%) hoặc chưa kết nối. Khởi chạy quét tìm mạng mạnh hơn...")
+                    @Suppress("DEPRECATION")
+                    try {
+                        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                        wm.startScan()
+                    } catch (_: Exception) {}
+                } else {
+                    Log.d("WifiMonitorService", "🔋 Mạng hiện tại đang rất tốt (${state.signalPercent}%). Bỏ qua quét WiFi để siêu tiết kiệm pin.")
+                }
 
                 // Cập nhật trạng thái kết nối độc lập (không phụ thuộc scan)
                 updateConnectionState(force = false)
@@ -410,16 +451,19 @@ class WifiMonitorService : Service() {
             return
         }
         
+        lastBypassAttemptSsid = state.ssid
+        lastBypassAttemptTimeMs = now
+        
         serviceScope.launch(Dispatchers.IO) {
             try {
-                val redirectUrl = CaptivePortalBypasser.detectRedirectUrl()
+                val redirectUrl = CaptivePortalBypasser.detectRedirectUrl(this@WifiMonitorService)
                 if (!redirectUrl.isNullOrBlank()) {
                     lastBypassAttemptSsid = state.ssid
                     lastBypassAttemptTimeMs = System.currentTimeMillis()
                     
                     updateNotificationMessage("Đang tự vượt cổng chào WiFi '${state.ssid}'...")
                     
-                    val result = CaptivePortalBypasser.attemptAutoBypass(redirectUrl)
+                    val result = CaptivePortalBypasser.attemptAutoBypass(this@WifiMonitorService, redirectUrl)
                     
                     if (result.success) {
                         Log.d("WifiMonitorService", "Captive portal auto-bypass success: ${result.message}")
@@ -473,6 +517,10 @@ class WifiMonitorService : Service() {
         if (isRegistered) {
             unregisterReceiver(wifiReceiver)
             isRegistered = false
+        }
+        if (isScreenReceiverRegistered) {
+            unregisterReceiver(screenReceiver)
+            isScreenReceiverRegistered = false
         }
         serviceJob.cancel()
         super.onDestroy()
